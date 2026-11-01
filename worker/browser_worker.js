@@ -14,7 +14,9 @@ import { redactSensitiveUrl } from '../core/investigators/url_redaction.js';
 import { classifyWorkerResultStatus } from '../core/investigators/worker_result_status.js';
 import { verifyChromiumSandbox } from './chromium_sandbox_verifier.js';
 import { appendBounded, isBoundedPng, serializeBoundedJson, MAX_RESULT_BYTES, MAX_TEXT_FIELD_CHARS } from './resource_limits.js';
-import { validateInteractiveAction, MAX_INTERACTIVE_ACTIONS, MAX_INTERACTIVE_SCREENSHOTS, INTERACTION_TIMEOUT_MS, MAX_SESSION_MS } from '../core/interactive_action.js';
+import { validateInteractiveAction, hasSensitiveText, isSafePointerTarget, isSafeTextTarget,
+  MAX_INTERACTIVE_ACTIONS, MAX_INTERACTIVE_POINTER_MOVES, MAX_INTERACTIVE_SCREENSHOTS, MAX_INTERACTIVE_VIEWPORT_FRAME_BYTES,
+  INTERACTION_TIMEOUT_MS, MAX_SESSION_MS } from '../core/interactive_action.js';
 
 // Parse command-line flags
 function parseArgs() {
@@ -715,6 +717,7 @@ async function runInteractiveSession(page, context, durationMs) {
   page.setDefaultTimeout(INTERACTION_TIMEOUT_MS);
   page.setDefaultNavigationTimeout(INTERACTION_TIMEOUT_MS);
   let count = 0;
+  let pointerMoveCount = 0;
   let screenshotCount = 0;
   let sequence = 0;
   const emit = (type, observation, url = page.url(), details = {}) => {
@@ -762,15 +765,33 @@ async function runInteractiveSession(page, context, durationMs) {
     }
     const { requestId, action } = message || {};
     if (typeof requestId !== 'string' || requestId.length > 80) return;
+    const viewportCapture = message?.command === 'CAPTURE_VIEWPORT';
+    if (viewportCapture) {
+      if (!started || Date.now() >= endsAt) {
+        process.stdout.write(`TL_RESPONSE:${JSON.stringify({ requestId, ok: false, error: 'Interactive browser session is unavailable.' })}\n`);
+        return;
+      }
+      try {
+        const bytes = await page.screenshot({ type: 'jpeg', quality: 45, fullPage: false, timeout: INTERACTION_TIMEOUT_MS });
+        if (!Buffer.isBuffer(bytes) || bytes.length < 256 || bytes.length > MAX_INTERACTIVE_VIEWPORT_FRAME_BYTES) throw new Error('viewport frame exceeded limit');
+        process.stdout.write(`TL_RESPONSE:${JSON.stringify({ requestId, ok: true, viewportBase64: bytes.toString('base64') })}\n`);
+      } catch {
+        process.stdout.write(`TL_RESPONSE:${JSON.stringify({ requestId, ok: false, error: 'Viewport frame unavailable.' })}\n`);
+      }
+      return;
+    }
     if (!started) {
       process.stdout.write(`TL_RESPONSE:${JSON.stringify({ requestId, ok: false, error: 'Interactive session has not started.' })}\n`);
       return;
     }
     const validation = validateInteractiveAction(action);
-    if (!validation.valid || count >= MAX_INTERACTIVE_ACTIONS || (action?.type === 'screenshot' && screenshotCount >= MAX_INTERACTIVE_SCREENSHOTS) || Date.now() >= endsAt) {
+    const pointerMove = action?.type === 'pointer_move';
+    if (!validation.valid || (!pointerMove && count >= MAX_INTERACTIVE_ACTIONS) ||
+        (pointerMove && pointerMoveCount >= MAX_INTERACTIVE_POINTER_MOVES) || (action?.type === 'screenshot' && screenshotCount >= MAX_INTERACTIVE_SCREENSHOTS) || Date.now() >= endsAt) {
       process.stdout.write(`TL_RESPONSE:${JSON.stringify({ requestId, ok: false, error: 'Action rejected by session policy.' })}\n`); return;
     }
-    count++;
+    if (pointerMove) pointerMoveCount++;
+    else count++;
     emit('action_started', `Investigator requested ${action.type}.`);
     let response = { requestId, ok: true, action: action.type, url: redactSensitiveUrl(page.url()) };
     try {
@@ -780,6 +801,57 @@ async function runInteractiveSession(page, context, durationMs) {
       else if (action.type === 'forward') await page.goForward({ ...timeout, waitUntil: 'domcontentloaded' });
       else if (action.type === 'reload') await page.reload({ ...timeout, waitUntil: 'domcontentloaded' });
       else if (action.type === 'scroll') await page.evaluate(({ direction, pixels }) => window.scrollBy(0, (direction === 'up' ? -1 : 1) * pixels), action);
+      else if (['pointer_move', 'pointer_click', 'pointer_scroll'].includes(action.type)) {
+        const viewport = page.viewportSize();
+        const x = Math.min(viewport.width - 1, Math.round(action.x * (viewport.width - 1) / 10000));
+        const y = Math.min(viewport.height - 1, Math.round(action.y * (viewport.height - 1) / 10000));
+        if (action.type === 'pointer_move') await page.mouse.move(x, y);
+        else if (action.type === 'pointer_scroll') {
+          await page.mouse.move(x, y);
+          await page.mouse.wheel(0, (action.direction === 'up' ? -1 : 1) * action.pixels);
+        } else {
+          const target = await page.evaluate(({ x, y }) => {
+            const hit = document.elementFromPoint(x, y);
+            const el = hit?.closest('button,[role="button"],input[type="search"],input[type="text"],textarea') || hit;
+            if (!el || !el.isConnected || !el.getClientRects().length) return null;
+            return { tagName: el.tagName, type: el.getAttribute('type') || '', name: el.getAttribute('name') || '',
+              id: el.id || '', autocomplete: el.getAttribute('autocomplete') || '', ariaLabel: el.getAttribute('aria-label') || '',
+              label: el.innerText || '', role: el.getAttribute('role') || '', withinForm: Boolean(el.closest('form')),
+              formMethod: el.closest('form')?.method || '',
+              disabled: Boolean(el.disabled), readOnly: Boolean(el.readOnly), download: el.hasAttribute('download'),
+              contentEditable: el.getAttribute('contenteditable') === 'true' };
+          }, { x, y });
+          const safe = isSafePointerTarget(target);
+          if (!safe) throw new Error('The selected viewport target is not permitted.');
+          await page.mouse.click(x, y);
+        }
+      }
+      else if (action.type === 'type_focused') {
+        const target = await page.evaluate(() => {
+          const el = document.activeElement;
+          if (!el || !el.isConnected || !el.getClientRects().length) return null;
+          return { tagName: el.tagName, type: el.getAttribute('type') || '', name: el.getAttribute('name') || '', id: el.id || '',
+            autocomplete: el.getAttribute('autocomplete') || '', ariaLabel: el.getAttribute('aria-label') || '',
+            withinForm: Boolean(el.closest('form')), formMethod: el.closest('form')?.method || '',
+            disabled: Boolean(el.disabled), readOnly: Boolean(el.readOnly) };
+        });
+        if (!isSafeTextTarget(target) || hasSensitiveText(action.text)) throw new Error('Text entry is not allowed for the focused field or content.');
+        await page.keyboard.press('Control+A');
+        await page.keyboard.type(action.text);
+        response.typed = true;
+      }
+      else if (action.type === 'key') {
+        const target = await page.evaluate(() => {
+          const el = document.activeElement;
+          if (!el || !el.isConnected || !el.getClientRects().length) return null;
+          return { tagName: el.tagName, type: el.getAttribute('type') || '', name: el.getAttribute('name') || '', id: el.id || '',
+            autocomplete: el.getAttribute('autocomplete') || '', ariaLabel: el.getAttribute('aria-label') || '',
+            withinForm: Boolean(el.closest('form')), formMethod: el.closest('form')?.method || '',
+            disabled: Boolean(el.disabled), readOnly: Boolean(el.readOnly) };
+        });
+        if (!isSafeTextTarget(target)) throw new Error('Keyboard input is not allowed for the focused field.');
+        await page.keyboard.press(action.key);
+      }
       else if (action.type === 'click') {
         const locator = page.locator(action.selector).first();
         const safe = await locator.evaluate(el => el.isConnected && el.getClientRects().length > 0 && !el.closest('form') &&
@@ -790,11 +862,12 @@ async function runInteractiveSession(page, context, durationMs) {
         await locator.click(timeout);
       } else if (action.type === 'type') {
         const locator = page.locator(action.selector).first();
-        const safe = await locator.evaluate(el => el.isConnected && el.getClientRects().length > 0 &&
-          el.matches('input[type="text"],input[type="search"],textarea') &&
-          !el.closest('form') && !/(password|passwd|user|email|account|login|auth|otp|code|card|cvv|security|phone)/i.test(
-            `${el.name || ''} ${el.id || ''} ${el.getAttribute('autocomplete') || ''} ${el.getAttribute('aria-label') || ''}`));
-        if (!safe) throw new Error('The selected element is not an allowed standalone text input.');
+        const target = await locator.evaluate(el => ({ visible: el.isConnected && el.getClientRects().length > 0,
+          tagName: el.tagName, type: el.getAttribute('type') || '', name: el.getAttribute('name') || '', id: el.id || '',
+          autocomplete: el.getAttribute('autocomplete') || '', ariaLabel: el.getAttribute('aria-label') || '',
+          withinForm: Boolean(el.closest('form')), formMethod: el.closest('form')?.method || '',
+          disabled: Boolean(el.disabled), readOnly: Boolean(el.readOnly) }));
+        if (!target.visible || !isSafeTextTarget(target) || hasSensitiveText(action.text)) throw new Error('The selected element or text is not allowed.');
         await locator.fill(action.text, timeout);
         response.typed = true;
       } else if (action.type === 'screenshot') {

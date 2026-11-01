@@ -13,7 +13,7 @@ const investigationEngine = fs.readFileSync(new URL('../core/investigation_engin
 const backendServer = fs.readFileSync(new URL('../backend/server.js', import.meta.url), 'utf8');
 
 test('interactive browser panel uses existing case-authenticated APIs and bounded action controls', () => {
-  assert.match(consoleHtml, /id="mode-c-interactive-optin"/);
+  assert.match(consoleHtml, /id="intake-mode-c-interactive-optin"/);
   assert.match(consoleHtml, /interactive: interactive === true/);
   assert.match(consoleHtml, /new EventSource\(`\/api\/cases\/\$\{caseId\}\/events`\)/);
   for (const route of ['/interactions', '/interactive-artifacts/', '/cancel-live', '/evidence-report']) {
@@ -24,14 +24,66 @@ test('interactive browser panel uses existing case-authenticated APIs and bounde
   assert.doesNotMatch(consoleHtml, /remote-debugging-port|--no-sandbox/i);
 });
 
+test('interactive opt-in is selected before creation and is never offered as an existing-case conversion', () => {
+  const intakeOption = consoleHtml.indexOf('id="intake-mode-c-interactive-option"');
+  const consentModal = consoleHtml.indexOf('id="mode-c-consent-modal"');
+  assert.ok(intakeOption > 0 && intakeOption < consentModal,
+    'the checkbox must be in the new-case intake modal, before Mode C authorization');
+  assert.match(consoleHtml, /<label for="intake-mode-c-interactive-optin"[\s\S]*?<input type="checkbox" id="intake-mode-c-interactive-optin"/,
+    'a real associated label must toggle the pre-creation checkbox');
+  assert.match(consoleHtml, /function syncInteractiveOptinAvailability\(\)[\s\S]*?checkbox\.disabled = !enabled/,
+    'the opt-in is available only while Mode C is selected');
+  assert.match(consoleHtml, /showModeCConsentModal\(target, null, interactiveOptIn\)/,
+    'the pre-creation selection must survive into consent confirmation');
+  assert.match(consoleHtml, /interactive: interactive === true/,
+    'the selection must be sent on the initial case-creation request');
+  assert.match(consoleHtml, /created\.interactiveEnabled === true/,
+    'the initial UI state must use the backend-confirmed creation flag');
+  assert.match(consoleHtml, /id="mode-c-new-interactive-case"[\s\S]*?openIntakeModal\(\{ prefillTarget: target, inspectionMode: 'ISOLATED_LIVE' \}\)/,
+    'an existing non-interactive case must provide a prefilled new-case path');
+  assert.match(backendServer, /interactiveEnabled: icase\.schema\.interactiveSession\?\.enabled === true/,
+    'case creation response must return the persisted flag');
+});
+
 test('interactive type control exists uniquely and follows session readiness state', () => {
   assert.equal((consoleHtml.match(/id="interactive-type"/g) || []).length, 1,
     'the Playwright action selector must identify one real control');
   assert.match(consoleHtml, /<button[^>]*id="interactive-type"[^>]*>Type bounded text<\/button>/);
-  assert.match(consoleHtml, /for \(const id of \['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-screenshot', 'interactive-cancel'\]\) document\.getElementById\(id\)\.disabled = !running/);
-  assert.match(consoleHtml, /const running = session\.status === 'RUNNING'/);
+  assert.match(consoleHtml, /for \(const id of \['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel'\]\) document\.getElementById\(id\)\.disabled = !running/);
+  assert.match(consoleHtml, /const running = status === 'RUNNING'/);
   assert.match(consoleHtml, /document\.getElementById\('interactive-type'\)\?\.addEventListener\('click'/);
   assert.match(consoleHtml, /card\.style\.display = session\?\.enabled \? 'block' : 'none'/);
+  assert.match(consoleHtml, /id="view-website"[\s\S]*?id="ov-interactive-browser-card"[\s\S]*?id="web-screenshot-card"/,
+    'interactive controls must be colocated with the screenshot in the Website view');
+  assert.match(consoleHtml, /id="interactive-status-detail"[\s\S]*?Controls unlock only after sandbox verification and the worker start handshake/,
+    'the visible card must explain the pending readiness gate');
+  assert.match(consoleHtml, /id="interactive-scroll"/);
+  assert.match(consoleHtml, /submitInteractiveAction\(\{ type: 'scroll', direction, pixels \}\)/,
+    'the UI must expose only the worker-supported bounded scroll action');
+  assert.match(consoleHtml, /pixels < 1 \|\| pixels > 800/,
+    'the scroll control must preserve the worker action bound');
+  assert.match(consoleHtml, /id="interactive-live-viewport"/);
+  assert.match(consoleHtml, /interactive-viewport`\)/,
+    'the live image must use the authenticated, case-scoped viewport endpoint');
+  assert.match(consoleHtml, /event\.preventDefault\(\);\s*const text = interactiveViewportTextBuffer/,
+    'keyboard text is buffered locally until explicit Enter submission');
+  assert.match(consoleHtml, /pointer_click/);
+  assert.match(consoleHtml, /pointer_scroll/);
+  assert.match(consoleHtml, /interactiveViewportDisconnected[\s\S]*?document\.getElementById\(id\)\.disabled = true/,
+    'worker disconnect disables all browser inputs');
+  assert.match(consoleHtml, /Array\.isArray\(result\.details\)[\s\S]*?result\.details\.join\(' '\)/,
+    'bounded server validation details are visible when an action is rejected');
+  assert.match(backendServer, /app\.get\('\/api\/cases\/:id\/interactive-viewport'/);
+  assert.match(backendServer, /limit: 2, windowMs: 1000/);
+  assert.match(backendServer, /runtimeSessionActive !== true/,
+    'viewport responses require the live case session to remain active');
+  assert.match(browserWorker, /CAPTURE_VIEWPORT/);
+  assert.match(browserWorker, /type: 'jpeg', quality: 45/);
+  assert.match(browserWorker, /isSafeTextTarget\(target\) \|\| hasSensitiveText\(action\.text\)/,
+    'the worker independently verifies focus and text before keyboard entry');
+  assert.match(browserWorker, /page\.keyboard\.press\('Control\+A'\)/,
+    'viewport text replaces rather than submits an existing page-field value');
+  assert.match(backendServer, /MAX_INTERACTIVE_VIEWPORT_FRAME_BYTES/);
 });
 
 test('Docker typing failure reports schema details and value-redacted request shape', () => {
@@ -52,7 +104,7 @@ test('accepted interactive case renders a disabled STARTING card before the asyn
     'the accepted case must render its startup card before the SSE stream is opened');
   assert.match(consoleHtml, /interactiveSession: \{ enabled: true, status: 'STARTING', events: \[\] \}/,
     'the initial panel must reflect server-accepted interactive mode without claiming readiness');
-  assert.match(consoleHtml, /const running = session\.status === 'RUNNING'/,
+  assert.match(consoleHtml, /const running = status === 'RUNNING'/,
     'STARTING must keep interaction controls disabled until backend readiness reaches RUNNING');
   assert.match(consoleHtml, /switchView\('overview'\);[\s\S]*?const res = await window\.trustLayerApiFetch\('\/api\/cases'/,
     'case creation must start while the overview view is active');
@@ -79,7 +131,7 @@ test('Docker acceptance checks the card immediately after case creation, before 
     'card failure diagnostics must include the retained observer samples');
   assert.match(cardObserverHelper, /MutationObserver/);
   assert.match(cardObserverHelper, /cardDisplay: cardStyle\?\.display/);
-  assert.match(cardObserverHelper, /overviewActive: view\?\.classList\.contains\('active'\)/);
+  assert.match(cardObserverHelper, /websiteActive: view\?\.classList\.contains\('active'\)/);
   assert.doesNotMatch(cardObserverHelper, /caseAccessToken|operatorToken|cookie|authorization|targetUrl|caseId/i,
     'observer must not capture credentials or target data');
 });
@@ -126,7 +178,7 @@ test('Docker fixture test performs the first browser action before bounded conta
   assert.ok(typingInputsHelper.includes('await textInput.fill(text, { timeout: 5_000 })'));
   assert.ok(typingInputsHelper.includes('await selectorInput.inputValue({ timeout: 1_000 })'));
   assert.match(typingInputsHelper, /selectorMatchesExpectedFixture/);
-  assert.match(fixtureTest, /page\.locator\('#view-overview'\)[\s\S]*?view\.locator\('#ov-interactive-browser-card'\)[\s\S]*?card\.locator\('#interactive-type'\)/,
+  assert.match(fixtureTest, /page\.locator\('#view-website'\)[\s\S]*?view\.locator\('#ov-interactive-browser-card'\)[\s\S]*?card\.locator\('#interactive-type'\)/,
     'the action locator must be scoped to the actual view and interactive card');
   assert.match(fixtureTest, /button\.scrollIntoViewIfNeeded\(\{ timeout: 1_000 \}\)/,
     'the action control must use Playwright scrolling before the click');
@@ -210,7 +262,7 @@ test('typing-control failures retain bounded last-known UI and browser lifecycle
 });
 
 test('typing-control failure diagnostics use only last-known state and retain the actual error class', () => {
-  const lastReadinessSample = { ready: true, activeViewId: 'view-overview', controlEnabled: true };
+  const lastReadinessSample = { ready: true, activeViewId: 'view-website', controlEnabled: true };
   const diagnostic = buildTypingControlFailureDiagnostic({
     error: Object.assign(new Error('sensitive text must not be logged'), { name: 'TimeoutError' }),
     operation: 'scroll-button', phase: 'interaction-preflight',

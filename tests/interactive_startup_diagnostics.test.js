@@ -36,7 +36,7 @@ test('UI readiness evaluates the exact atomic DOM snapshot shape and ignores non
     statusCount: 1, displayedStatus: 'RUNNING', cardCount: 1, cardVisible: true,
     controlCount: 1, controlEnabled: true,
     caseStatus: 'COMPLETED', interactiveStatus: 'RUNNING', runtimeSessionActive: true,
-    activeViewId: 'view-overview'
+    activeViewId: 'view-website'
   };
   assert.equal(isInteractiveUiReady(observed), true,
     'case pipeline completion and overview are not predicates in the wait condition');

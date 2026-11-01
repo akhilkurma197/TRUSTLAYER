@@ -9,19 +9,23 @@ const html = fs.readFileSync(new URL('../investigation.html', import.meta.url), 
 function loadInteractiveUiContract() {
   const helpersStart = html.indexOf('function interactiveSessionPhase(status) {');
   const helpersEnd = html.indexOf('\nasync function loadEvidenceReport', helpersStart);
-  const rendererStart = html.indexOf('function renderInteractivePanel(schema) {', helpersEnd);
+  const rendererStart = html.indexOf('let interactiveViewportTimer = null;', helpersEnd);
   const rendererEnd = html.indexOf('\nasync function submitInteractiveAction', rendererStart);
   assert.ok(helpersStart >= 0 && helpersEnd > helpersStart && rendererStart > helpersEnd && rendererEnd > rendererStart,
     'interactive state helpers and panel renderer must be present');
 
-  const ids = ['ov-interactive-browser-card', 'interactive-status', 'interactive-events',
-    'interactive-screenshot-preview', 'interactive-navigate', 'interactive-click', 'interactive-type',
-    'interactive-screenshot', 'interactive-cancel'];
-  const elements = new Map(ids.map(id => [id, { id, style: {}, disabled: false, textContent: '', src: '' }]));
+  const ids = ['ov-interactive-browser-card', 'interactive-status', 'interactive-status-detail', 'interactive-events',
+    'interactive-viewport-status', 'interactive-viewport-shell', 'interactive-live-viewport', 'interactive-viewport-placeholder',
+    'interactive-viewport-input-status', 'interactive-screenshot-preview', 'interactive-navigate', 'interactive-click', 'interactive-type',
+    'interactive-scroll', 'interactive-screenshot', 'interactive-cancel'];
+  const elements = new Map(ids.map(id => [id, { id, style: {}, disabled: false, textContent: '', src: '', dataset: {}, removeAttribute() {} }]));
+  elements.set('interactive-viewport-shell', null);
   const context = {
     window: {},
     activeCase: null,
     interactiveLiveEvents: [],
+    setTimeout: () => 1,
+    clearTimeout: () => {},
     document: { getElementById: id => elements.get(id) || null },
     updateCaseUI: schema => context.renderInteractivePanel(schema)
   };
@@ -75,7 +79,8 @@ test('frontend consumes the confirmed SSE schema, keeps STARTING disabled, and r
   assert.equal(elements.get('ov-interactive-browser-card').style.display, 'block',
     'an accepted interactive case must display the card while the session is still starting');
   assert.equal(elements.get('interactive-status').textContent, 'STARTING');
-  for (const id of ['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-screenshot', 'interactive-cancel']) {
+  assert.match(elements.get('interactive-status-detail').textContent, /Controls unlock only after sandbox verification/);
+  for (const id of ['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel']) {
     assert.equal(elements.get(id).disabled, true, `${id} must remain disabled before backend confirmation`);
   }
 
@@ -85,7 +90,9 @@ test('frontend consumes the confirmed SSE schema, keeps STARTING disabled, and r
   assert.equal(eventSchema.interactiveSession.status, 'RUNNING');
   context.acceptCaseSchema(eventSchema);
   assert.equal(elements.get('interactive-status').textContent, 'RUNNING');
+  assert.match(elements.get('interactive-status-detail').textContent, /Browser ready/);
   assert.equal(elements.get('interactive-type').disabled, false);
+  assert.equal(elements.get('interactive-scroll').disabled, false);
 
   context.acceptCaseSchema(starting); // delayed pre-ready GET/SSE snapshot
   assert.equal(context.window.activeCase.schema.interactiveSession.status, 'RUNNING');
@@ -105,8 +112,25 @@ test('terminal interactive state cannot be overwritten by stale RUNNING data', (
   assert.equal(elements.get('ov-interactive-browser-card').style.display, 'block',
     'terminal session state remains visible so the user can see the actual outcome');
   assert.equal(elements.get('interactive-status').textContent, 'ENDED');
+  assert.match(elements.get('interactive-status-detail').textContent, /session ended/);
   assert.equal(elements.get('interactive-type').disabled, true);
+  assert.equal(elements.get('interactive-scroll').disabled, true);
   context.acceptCaseSchema(running);
   assert.equal(context.window.activeCase.schema.interactiveSession.status, 'ENDED');
   assert.equal(elements.get('interactive-type').disabled, true);
+});
+
+test('live viewport maps displayed letterboxed image coordinates to normalized worker coordinates', () => {
+  const start = html.indexOf('function viewportRatios(event) {');
+  const end = html.indexOf('\nfunction isSensitiveViewportText', start);
+  assert.ok(start >= 0 && end > start, 'frontend coordinate mapper must exist');
+  const image = { naturalWidth: 1280, naturalHeight: 800,
+    getBoundingClientRect: () => ({ left: 10, top: 20, width: 640, height: 480 }) };
+  const context = { document: { getElementById: id => id === 'interactive-live-viewport' ? image : null } };
+  vm.createContext(context);
+  vm.runInContext(`${html.slice(start, end)}; globalThis.mapViewportPoint = viewportRatios;`, context);
+  assert.deepEqual({ ...context.mapViewportPoint({ clientX: 330, clientY: 260 }) }, { x: 5000, y: 5000 },
+    'letterbox offsets and 2x display scaling must map to the actual 1280x800 worker viewport');
+  assert.equal(context.mapViewportPoint({ clientX: 330, clientY: 25 }), null,
+    'clicks in the letterbox margin are not sent to the worker');
 });

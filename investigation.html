@@ -487,24 +487,6 @@ html, body { height: 100%; overflow: hidden; background: var(--bg-deep); color: 
           <div id="ov-report-next" style="margin-top:8px;color:var(--blue);font-size:11px;"></div>
         </div>
 
-        <div class="card" id="ov-interactive-browser-card" style="display:none;margin-top:12px;">
-          <div class="card-header"><span class="card-title">Isolated interactive browser</span><span class="badge UNKNOWN" id="interactive-status">NOT ENABLED</span></div>
-          <div id="interactive-failure" role="status" style="color:#fbbf24;font-size:11px;margin-bottom:8px;"></div>
-          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:6px;">
-            <input id="interactive-navigation-url" placeholder="https://destination (proxy validated)" aria-label="Navigation URL" maxlength="4096">
-            <button class="btn" id="interactive-navigate">Navigate</button>
-            <input id="interactive-selector" placeholder="Visible button selector" aria-label="Visible button CSS selector" maxlength="160">
-            <button class="btn" id="interactive-click">Click permitted button</button>
-            <input id="interactive-type-selector" placeholder="Standalone text field selector" aria-label="Text field CSS selector" maxlength="160">
-            <input id="interactive-type-text" placeholder="Non-sensitive text only" aria-label="Non-sensitive text" maxlength="200">
-            <button class="btn" id="interactive-type">Type bounded text</button>
-            <button class="btn" id="interactive-screenshot">Capture screenshot</button>
-            <button class="btn btn-danger" id="interactive-cancel">Stop browser</button>
-          </div>
-          <img id="interactive-screenshot-preview" alt="Authorized isolated browser screenshot" style="display:none;max-width:100%;max-height:480px;margin-top:10px;border:1px solid var(--border);">
-          <div id="interactive-events" aria-live="polite" style="max-height:180px;overflow:auto;margin-top:10px;font:10px/1.5 var(--font-mono);color:var(--text-secondary);"></div>
-        </div>
-
         <!-- Trust Breakpoints Container -->
         <div id="ov-breakpoints-container"></div>
 
@@ -662,6 +644,35 @@ html, body { height: 100%; overflow: hidden; background: var(--bg-deep); color: 
         <div id="page-native-banner" style="display:none;margin-bottom:12px;padding:12px 14px;background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.3);border-radius:8px;font-size:12px;line-height:1.6;">
           <strong style="color:var(--blue);">ℹ️ Native Action Protocol Target (No HTML Document)</strong>
           <div id="page-native-desc" style="color:var(--text-secondary);margin-top:4px;"></div>
+        </div>
+
+        <div class="card" id="ov-interactive-browser-card" style="display:none;margin-bottom:14px;border-left:3px solid var(--blue);">
+          <div class="card-header"><span class="card-title">Isolated interactive browser controls</span><span class="badge UNKNOWN" id="interactive-status">NOT ENABLED</span></div>
+          <div id="interactive-status-detail" role="status" aria-live="polite" style="font-size:11px;color:var(--text-secondary);line-height:1.6;margin-bottom:8px;">Controls appear for cases created with bounded interactive browser controls.</div>
+          <div id="interactive-viewport-status" role="status" aria-live="polite" style="font-size:10px;color:var(--text-secondary);margin-bottom:6px;">Live viewport connects when the isolated worker is ready.</div>
+          <div id="interactive-viewport-shell" tabindex="0" aria-label="Isolated browser viewport. Click to interact; type text and press Enter to send it." style="position:relative;display:flex;align-items:center;justify-content:center;min-height:180px;max-height:620px;background:#05080c;border:1px solid var(--border);border-radius:5px;overflow:hidden;outline:none;">
+            <img id="interactive-live-viewport" alt="Live view of the isolated browser; input is sent only to the case-scoped worker" draggable="false" style="display:none;max-width:100%;max-height:600px;object-fit:contain;cursor:crosshair;user-select:none;">
+            <span id="interactive-viewport-placeholder" style="padding:18px;color:var(--text-muted);font-size:11px;text-align:center;">Waiting for the isolated browser viewport.</span>
+          </div>
+          <div id="interactive-viewport-input-status" role="status" aria-live="polite" style="font-size:10px;color:var(--text-muted);margin-top:5px;">Focus the viewport to use the mouse. Type into a focused search or standalone text field, then press Enter to send. Text stays local until Enter; do not enter secrets.</div>
+          <div id="interactive-failure" role="status" style="color:#fbbf24;font-size:11px;margin-bottom:8px;"></div>
+          <details style="margin-top:8px;"><summary style="cursor:pointer;color:var(--text-secondary);font-size:11px;">Button-based controls (fallback)</summary><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:6px;margin-top:8px;">
+            <input id="interactive-navigation-url" placeholder="https://destination (proxy validated)" aria-label="Navigation URL" maxlength="4096">
+            <button class="btn" id="interactive-navigate">Navigate</button>
+            <input id="interactive-selector" placeholder="Visible button selector" aria-label="Visible button CSS selector" maxlength="160">
+            <button class="btn" id="interactive-click">Click permitted button</button>
+            <input id="interactive-type-selector" placeholder="Standalone text field selector" aria-label="Text field CSS selector" maxlength="160">
+            <input id="interactive-type-text" placeholder="Non-sensitive text only" aria-label="Non-sensitive text" maxlength="200">
+            <button class="btn" id="interactive-type">Type bounded text</button>
+            <select id="interactive-scroll-direction" aria-label="Scroll direction"><option value="down">Scroll down</option><option value="up">Scroll up</option></select>
+            <input id="interactive-scroll-pixels" type="number" min="1" max="800" step="1" value="400" aria-label="Scroll distance in pixels">
+            <button class="btn" id="interactive-scroll">Scroll bounded distance</button>
+            <button class="btn" id="interactive-screenshot">Capture screenshot</button>
+            <button class="btn btn-danger" id="interactive-cancel">Stop browser</button>
+          </div></details>
+          <div style="font-size:10px;color:var(--text-muted);margin-top:7px;">Actions are bounded and proxied. Do not enter passwords, payment details, or other secrets.</div>
+          <img id="interactive-screenshot-preview" alt="Authorized isolated browser screenshot" style="display:none;max-width:100%;max-height:480px;margin-top:10px;border:1px solid var(--border);">
+          <div id="interactive-events" aria-live="polite" style="max-height:180px;overflow:auto;margin-top:10px;font:10px/1.5 var(--font-mono);color:var(--text-secondary);"></div>
         </div>
 
         <!-- Inspected Webpage Screenshot Preview Card -->
@@ -1122,6 +1133,11 @@ html, body { height: 100%; overflow: hidden; background: var(--bg-deep); color: 
         </div>
       </div>
 
+      <label for="intake-mode-c-interactive-optin" id="intake-mode-c-interactive-option" style="display:flex;align-items:flex-start;gap:9px;padding:10px 12px;border:1px solid rgba(56,189,248,.3);border-radius:6px;color:#cbd5e1;font-size:11px;line-height:1.5;">
+        <input type="checkbox" id="intake-mode-c-interactive-optin" aria-describedby="intake-mode-c-interactive-help" style="margin-top:2px;">
+        <span><strong style="display:block;color:#38bdf8;">Enable bounded interactive browser controls</strong><span id="intake-mode-c-interactive-help">Optional for a new Mode C case. Only bounded actions are available. Never enter passwords, payment data, or other secrets.</span></span>
+      </label>
+
       <div style="border-top:1px solid var(--border-subtle);padding-top:10px;">
         <span style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);text-transform:uppercase;">Controlled Test Vectors:</span>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;">
@@ -1172,11 +1188,11 @@ html, body { height: 100%; overflow: hidden; background: var(--bg-deep); color: 
         </select>
       </label>
 
-      <label style="display:flex;align-items:flex-start;gap:9px;padding:10px 12px;border:1px solid rgba(56,189,248,.3);border-radius:6px;color:#cbd5e1;font-size:11px;line-height:1.5;">
-        <input type="checkbox" id="mode-c-interactive-optin" style="margin-top:2px;">
-        <span><strong style="display:block;color:#38bdf8;">Enable bounded interactive browser controls</strong>Optional. The isolated browser may accept only existing bounded actions. Never enter passwords, payment data, or other secrets.</span>
-      </label>
-      <div id="mode-c-interactive-upgrade-note" style="display:none;color:#fbbf24;font-size:11px;">Interactive controls must be enabled when the case is created; this existing case cannot be converted.</div>
+      <div id="mode-c-interactive-consent-summary" style="display:none;color:#bae6fd;font-size:11px;">Bounded interactive controls will be enabled when this new case is created.</div>
+      <div id="mode-c-interactive-upgrade-note" style="display:none;color:#fbbf24;font-size:11px;line-height:1.6;">
+        Interactive controls must be enabled when a case is created; this existing case cannot be converted.
+        <button class="btn" id="mode-c-new-interactive-case" type="button" style="margin-left:6px;">Create a new case with interactive controls</button>
+      </div>
 
       <div style="display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-top:8px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.08);">
         <button class="btn" onclick="closeModeCConsentModal()" style="padding:9px 18px;background:rgba(255,255,255,0.08);color:#cbd5e1;border:1px solid rgba(255,255,255,0.15);border-radius:6px;cursor:pointer;font-weight:600;">Cancel</button>
@@ -1269,15 +1285,41 @@ document.querySelectorAll('.nav-item').forEach(item => {
 const intakeModal = document.getElementById('intake-modal');
 const intakeInput = document.getElementById('intake-input');
 
-function openIntakeModal() {
+function syncInteractiveOptinAvailability() {
+  const mode = document.querySelector('input[name="inspection-mode"]:checked')?.value || 'URL_ONLY';
+  const option = document.getElementById('intake-mode-c-interactive-option');
+  const checkbox = document.getElementById('intake-mode-c-interactive-optin');
+  const enabled = mode === 'ISOLATED_LIVE';
+  if (option) {
+    option.style.opacity = enabled ? '1' : '0.55';
+    option.title = enabled ? '' : 'Select Mode C to enable bounded browser controls.';
+  }
+  if (checkbox) {
+    checkbox.disabled = !enabled;
+    if (!enabled) checkbox.checked = false;
+  }
+}
+
+function openIntakeModal({ prefillTarget = '', inspectionMode = null } = {}) {
   intakeModal.classList.remove('hidden');
-  intakeInput.value = '';
+  intakeInput.value = prefillTarget;
+  const interactiveOptIn = document.getElementById('intake-mode-c-interactive-optin');
+  if (interactiveOptIn) interactiveOptIn.checked = false;
+  if (inspectionMode) {
+    const radio = document.querySelector(`input[name="inspection-mode"][value="${inspectionMode}"]`);
+    if (radio) radio.checked = true;
+  }
+  syncInteractiveOptinAvailability();
   setTimeout(() => intakeInput.focus(), 50);
 }
 function closeIntakeModal() { intakeModal.classList.add('hidden'); }
 
-document.getElementById('btn-new-case').addEventListener('click', openIntakeModal);
+document.getElementById('btn-new-case').addEventListener('click', () => openIntakeModal());
 document.getElementById('btn-close-intake').addEventListener('click', closeIntakeModal);
+document.querySelectorAll('input[name="inspection-mode"]').forEach(radio => {
+  radio.addEventListener('change', syncInteractiveOptinAvailability);
+});
+syncInteractiveOptinAvailability();
 
 // Click outside modal box → close
 intakeModal.addEventListener('click', (e) => {
@@ -1355,14 +1397,16 @@ window.loadCaseById = async function(id) {
 // ── Mode C (Isolated Live Inspection) UI Handlers ─────────────────────────
 let pendingLiveTarget = null;
 let pendingLiveCaseId = null;
+let pendingLiveInteractiveOptIn = false;
 
-function showModeCConsentModal(target, caseId = null) {
+function showModeCConsentModal(target, caseId = null, interactiveOptIn = false) {
   pendingLiveTarget = target;
   pendingLiveCaseId = caseId;
-  const interactiveOptIn = document.getElementById('mode-c-interactive-optin');
+  pendingLiveInteractiveOptIn = !caseId && interactiveOptIn === true;
   const upgradeNote = document.getElementById('mode-c-interactive-upgrade-note');
-  if (interactiveOptIn) { interactiveOptIn.checked = false; interactiveOptIn.disabled = Boolean(caseId); }
   if (upgradeNote) upgradeNote.style.display = caseId ? 'block' : 'none';
+  const interactiveSummary = document.getElementById('mode-c-interactive-consent-summary');
+  if (interactiveSummary) interactiveSummary.style.display = pendingLiveInteractiveOptIn ? 'block' : 'none';
   const targetEl = document.getElementById('modal-target-url');
   if (targetEl) targetEl.textContent = target;
   const modal = document.getElementById('mode-c-consent-modal');
@@ -1379,14 +1423,23 @@ function closeModeCConsentModal() {
   if (modal) modal.style.display = 'none';
   pendingLiveTarget = null;
   pendingLiveCaseId = null;
+  pendingLiveInteractiveOptIn = false;
 }
+
+document.getElementById('mode-c-new-interactive-case')?.addEventListener('click', () => {
+  const target = pendingLiveTarget || window.activeCase?.target || '';
+  closeModeCConsentModal();
+  const radio = document.querySelector('input[name="inspection-mode"][value="ISOLATED_LIVE"]');
+  if (radio) radio.checked = true;
+  openIntakeModal({ prefillTarget: target, inspectionMode: 'ISOLATED_LIVE' });
+});
 
 const confirmModalBtn = document.getElementById('modal-confirm-btn');
 if (confirmModalBtn) {
   confirmModalBtn.addEventListener('click', async () => {
     const target = pendingLiveTarget;
     const caseId = pendingLiveCaseId;
-    const interactiveOptIn = !caseId && document.getElementById('mode-c-interactive-optin')?.checked === true;
+    const interactiveOptIn = !caseId && pendingLiveInteractiveOptIn;
     closeModeCConsentModal();
 
     if (caseId) {
@@ -1638,7 +1691,8 @@ window.triggerCase = function(target, explicitMode = null) {
   document.getElementById('intake-modal').classList.add('hidden');
   const selectedMode = explicitMode || document.querySelector('input[name="inspection-mode"]:checked')?.value || 'URL_ONLY';
   if (selectedMode === 'ISOLATED_LIVE') {
-    showModeCConsentModal(target);
+    const interactiveOptIn = document.getElementById('intake-mode-c-interactive-optin')?.checked === true;
+    showModeCConsentModal(target, null, interactiveOptIn);
   } else if (selectedMode === 'MODE_B') {
     if (confirmModeBConsent(target)) runInvestigation(target, selectedMode, true);
   } else {
@@ -1699,9 +1753,10 @@ async function runInvestigation(target, inspectionMode = 'URL_ONLY', consentConf
     document.getElementById('sb-case-info').textContent = `Case #${caseId} · ${cleanTarget}`;
 
     // Store a minimal activeCase ref for export
+    const acceptedInteractive = inspectionMode === 'ISOLATED_LIVE' && created.interactiveEnabled === true;
     const initialSchema = inspectionMode === 'ISOLATED_LIVE'
       ? { id: caseId, target: cleanTarget, inspectionMode, status: 'NORMALIZING', evidence: [],
-        ...(interactive === true ? { interactiveSession: { enabled: true, status: 'STARTING', events: [] } } : {}) }
+        ...(acceptedInteractive ? { interactiveSession: { enabled: true, status: 'STARTING', events: [] } } : {}) }
       : null;
     window.activeCase = activeCase = { id: caseId, target: cleanTarget, schema: initialSchema };
     if (initialSchema) {
@@ -1880,15 +1935,201 @@ async function loadEvidenceReport(schema) {
   } catch (error) { evidenceReportRequestKey = null; statusEl.textContent = error.message; }
 }
 
+let interactiveViewportTimer = null;
+let interactiveViewportInFlight = false;
+let interactiveViewportObjectUrl = null;
+let interactiveViewportCaseId = null;
+let interactiveViewportLastMoveAt = 0;
+let interactiveViewportTextBuffer = '';
+let interactiveViewportDisconnected = false;
+
+function setViewportDisconnected(message) {
+  const status = document.getElementById('interactive-viewport-status');
+  if (status) status.textContent = message;
+}
+
+function scheduleInteractiveViewport(caseId, delay = 0) {
+  if (interactiveViewportTimer || interactiveViewportInFlight || interactiveViewportCaseId !== caseId) return;
+  interactiveViewportTimer = setTimeout(async () => {
+    interactiveViewportTimer = null;
+    if (window.activeCase?.id !== caseId || window.activeCase?.schema?.interactiveSession?.status !== 'RUNNING') return;
+    interactiveViewportInFlight = true;
+    try {
+      const response = await window.trustLayerApiFetch(`/api/cases/${caseId}/interactive-viewport`);
+      if (!response.ok) {
+        if (response.status === 409) interactiveViewportDisconnected = true;
+        throw new Error(response.status === 409 ? 'Worker disconnected; input is disabled.' : `Frame unavailable (HTTP ${response.status}).`);
+      }
+      const blob = await response.blob();
+      if (blob.type !== 'image/jpeg' || blob.size < 256 || blob.size > 1024 * 1024) throw new Error('Invalid bounded viewport frame.');
+      if (window.activeCase?.id !== caseId) return;
+      const image = document.getElementById('interactive-live-viewport');
+      const placeholder = document.getElementById('interactive-viewport-placeholder');
+      const nextUrl = URL.createObjectURL(blob);
+      const previousUrl = interactiveViewportObjectUrl;
+      interactiveViewportObjectUrl = nextUrl;
+      image.onload = () => { if (previousUrl) URL.revokeObjectURL(previousUrl); };
+      image.src = nextUrl;
+      image.style.display = 'block';
+      interactiveViewportDisconnected = false;
+      for (const id of ['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel']) {
+        document.getElementById(id).disabled = window.activeCase?.schema?.interactiveSession?.status !== 'RUNNING';
+      }
+      if (placeholder) placeholder.style.display = 'none';
+      setViewportDisconnected('Connected to the isolated browser · refreshed live frame.');
+    } catch (error) {
+      setViewportDisconnected(`Viewport disconnected or unavailable: ${error.message}`);
+    } finally {
+      interactiveViewportInFlight = false;
+      const current = window.activeCase;
+      if (current?.schema?.interactiveSession?.status === 'RUNNING') {
+        if (interactiveViewportDisconnected) {
+          for (const id of ['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel']) document.getElementById(id).disabled = true;
+        }
+        if (interactiveViewportCaseId !== current.id) interactiveViewportCaseId = current.id;
+        scheduleInteractiveViewport(current.id, interactiveViewportDisconnected ? 2000 : 500);
+      }
+    }
+  }, delay);
+}
+
+function stopInteractiveViewport(message = 'Viewport stopped.') {
+  if (interactiveViewportTimer) clearTimeout(interactiveViewportTimer);
+  interactiveViewportTimer = null;
+  interactiveViewportCaseId = null;
+  interactiveViewportDisconnected = false;
+  interactiveViewportTextBuffer = '';
+  if (interactiveViewportObjectUrl) URL.revokeObjectURL(interactiveViewportObjectUrl);
+  interactiveViewportObjectUrl = null;
+  const image = document.getElementById('interactive-live-viewport');
+  const placeholder = document.getElementById('interactive-viewport-placeholder');
+  if (image) { image.removeAttribute('src'); image.style.display = 'none'; }
+  if (placeholder) { placeholder.style.display = 'block'; placeholder.textContent = message; }
+  setViewportDisconnected(message);
+}
+
+function viewportRatios(event) {
+  const image = document.getElementById('interactive-live-viewport');
+  const rect = image.getBoundingClientRect();
+  if (!image.naturalWidth || !image.naturalHeight || rect.width <= 0 || rect.height <= 0) return null;
+  const scale = Math.min(rect.width / image.naturalWidth, rect.height / image.naturalHeight);
+  const displayWidth = image.naturalWidth * scale;
+  const displayHeight = image.naturalHeight * scale;
+  const left = rect.left + (rect.width - displayWidth) / 2;
+  const top = rect.top + (rect.height - displayHeight) / 2;
+  const x = Math.round((event.clientX - left) / displayWidth * 10000);
+  const y = Math.round((event.clientY - top) / displayHeight * 10000);
+  if (x < 0 || x > 10000 || y < 0 || y > 10000) return null;
+  return { x, y };
+}
+
+function isSensitiveViewportText(text) {
+  const compact = text.replace(/[\s-]/g, '');
+  if (/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(text) || /\b(?:password|passwd|secret|api[_ -]?key|access[_ -]?token|private[_ -]?key)\b/i.test(text)) return true;
+  if (/\+?\d{10,15}/.test(compact)) return true;
+  const digits = compact.replace(/\D/g, '');
+  if (digits.length >= 13 && digits.length <= 19) {
+    let sum = 0, double = false;
+    for (let i = digits.length - 1; i >= 0; i--) { let n = Number(digits[i]); if (double && (n *= 2) > 9) n -= 9; sum += n; double = !double; }
+    if (sum % 10 === 0) return true;
+  }
+  return text.length >= 24 && /^[A-Za-z0-9_./+=-]+$/.test(text) && new Set(text).size / text.length > 0.55;
+}
+
+function bindInteractiveViewport() {
+  const shell = document.getElementById('interactive-viewport-shell');
+  const image = document.getElementById('interactive-live-viewport');
+  if (!shell || !image || shell.dataset.bound === 'true') return;
+  shell.dataset.bound = 'true';
+  image.addEventListener('mousemove', event => {
+    const now = Date.now();
+    if (now - interactiveViewportLastMoveAt < 500) return;
+    const point = viewportRatios(event);
+    if (!point) return;
+    interactiveViewportLastMoveAt = now;
+    void submitInteractiveAction({ type: 'pointer_move', ...point }, { refreshCase: false, quiet: true });
+  });
+  image.addEventListener('click', event => {
+    shell.focus();
+    const point = viewportRatios(event);
+    if (point) void submitInteractiveAction({ type: 'pointer_click', ...point });
+  });
+  shell.addEventListener('wheel', event => {
+    const point = viewportRatios(event);
+    if (!point) return;
+    event.preventDefault();
+    const pixels = Math.min(800, Math.max(1, Math.round(Math.abs(event.deltaY))));
+    void submitInteractiveAction({ type: 'pointer_scroll', ...point, direction: event.deltaY < 0 ? 'up' : 'down', pixels }, { refreshCase: false });
+  }, { passive: false });
+  shell.addEventListener('keydown', event => {
+    const textStatus = document.getElementById('interactive-viewport-input-status');
+    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      if (interactiveViewportTextBuffer.length < 200) interactiveViewportTextBuffer += event.key;
+      if (textStatus) textStatus.textContent = `Text buffered locally (${interactiveViewportTextBuffer.length}/200); press Enter to send to the focused isolated page. Nothing has been sent yet.`;
+      event.preventDefault();
+      return;
+    }
+    if (event.key === 'Backspace' && interactiveViewportTextBuffer) {
+      interactiveViewportTextBuffer = interactiveViewportTextBuffer.slice(0, -1);
+      if (textStatus) textStatus.textContent = `Text buffered locally (${interactiveViewportTextBuffer.length}/200); press Enter to send.`;
+      event.preventDefault();
+      return;
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      const text = interactiveViewportTextBuffer;
+      interactiveViewportTextBuffer = '';
+      if (!text) {
+        if (textStatus) textStatus.textContent = 'No text was buffered; nothing was sent to the isolated page.';
+        return;
+      }
+      if (isSensitiveViewportText(text)) {
+        if (textStatus) textStatus.textContent = 'Input blocked because it matches a sensitive-data pattern; the value was not sent.';
+        return;
+      }
+      const send = submitInteractiveAction({ type: 'type_focused', text }, { refreshCase: false });
+      void send.then(ok => {
+        if (ok) return submitInteractiveAction({ type: 'key', key: 'Enter' }, { refreshCase: false });
+      });
+      if (textStatus) textStatus.textContent = 'Sending bounded input to the focused isolated page.';
+      return;
+    }
+    if (['Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
+      event.preventDefault();
+      void submitInteractiveAction({ type: 'key', key: event.key }, { refreshCase: false });
+    }
+  });
+}
+
 function renderInteractivePanel(schema) {
   const card = document.getElementById('ov-interactive-browser-card');
   const session = schema.interactiveSession;
   if (!card) return;
   card.style.display = session?.enabled ? 'block' : 'none';
-  if (!session?.enabled) return;
-  document.getElementById('interactive-status').textContent = session.status || 'UNKNOWN';
-  const running = session.status === 'RUNNING';
-  for (const id of ['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-screenshot', 'interactive-cancel']) document.getElementById(id).disabled = !running;
+  if (!session?.enabled) { stopInteractiveViewport('Viewport is available only for interactive cases.'); return; }
+  const status = session.status || 'UNKNOWN';
+  document.getElementById('interactive-status').textContent = status;
+  const running = status === 'RUNNING';
+  const statusDetail = document.getElementById('interactive-status-detail');
+  if (statusDetail) {
+    statusDetail.textContent = running
+      ? 'Browser ready. Clicks, text entry, navigation, and scrolling are bounded and filtered by the isolated worker.'
+      : (status === 'STARTING'
+        ? 'Starting isolated Chromium. Controls unlock only after sandbox verification and the worker start handshake.'
+        : (['ENDED', 'CANCELLED', 'FAILED', 'COMPLETED'].includes(status)
+          ? `Interactive session ${status.toLowerCase()}; controls are disabled. Create a new interactive case to start another session.`
+          : `Interactive session status: ${status}. Controls remain disabled until the worker is confirmed ready.`));
+  }
+  for (const id of ['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel']) document.getElementById(id).disabled = !running;
+  if (running) {
+    if (interactiveViewportCaseId !== schema.id) stopInteractiveViewport('Connecting to the isolated browser…');
+    interactiveViewportCaseId = schema.id;
+    for (const id of ['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel']) {
+      document.getElementById(id).disabled = interactiveViewportDisconnected;
+    }
+    bindInteractiveViewport();
+    scheduleInteractiveViewport(schema.id);
+  } else stopInteractiveViewport(status === 'STARTING' ? 'Waiting for isolated browser readiness.' : `Viewport stopped (${status}).`);
   const events = [...(session.events || []), ...interactiveLiveEvents.filter(event => event.investigationId === schema.id)].slice(-12);
   document.getElementById('interactive-events').textContent = events.map(event => `${new Date(event.timestamp || Date.now()).toLocaleTimeString()} · ${event.type}: ${event.observation || event.finding || ''}`).join('\n') || 'No browser events received yet.';
   const latestArtifact = [...(schema.evidence || [])].reverse().find(item => item.category === 'screenshot' && /^[a-f0-9]{32}$/.test(item.data?.artifactId || ''));
@@ -1899,29 +2140,44 @@ function renderInteractivePanel(schema) {
   }
 }
 
-async function submitInteractiveAction(action) {
+async function submitInteractiveAction(action, { refreshCase = true, quiet = false } = {}) {
   const schema = window.activeCase?.schema;
   const failure = document.getElementById('interactive-failure');
   if (!schema?.interactiveSession?.enabled) { failure.textContent = 'This case was not created with interactive browser controls.'; return; }
-  failure.textContent = 'Submitting bounded action…';
+  if (!quiet) failure.textContent = 'Submitting bounded action…';
   try {
     const response = await window.trustLayerApiFetch(`/api/cases/${schema.id}/interactions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || `Action failed (HTTP ${response.status}).`);
-    failure.textContent = `${result.action} completed.`;
+    if (!response.ok) {
+      const detail = Array.isArray(result.details) ? ` ${result.details.join(' ')}` : '';
+      throw new Error(`${result.error || `Action failed (HTTP ${response.status}).`}${detail}`);
+    }
+    if (!quiet) failure.textContent = `${result.action} completed.`;
     if (result.artifactId) {
       const image = document.getElementById('interactive-screenshot-preview');
       image.src = `/api/cases/${schema.id}/interactive-artifacts/${result.artifactId}`;
       image.style.display = 'block';
     }
-    const latest = await window.trustLayerApiFetch(`/api/cases/${schema.id}`).then(response => response.json());
-    if (window.activeCase?.id === latest.id) acceptCaseSchema(latest);
-  } catch (error) { failure.textContent = `Action unavailable: ${error.message}`; }
+    if (refreshCase) {
+      const latest = await window.trustLayerApiFetch(`/api/cases/${schema.id}`).then(response => response.json());
+      if (window.activeCase?.id === latest.id) acceptCaseSchema(latest);
+    }
+    return true;
+  } catch (error) { if (!quiet) failure.textContent = `Action unavailable: ${error.message}`; return false; }
 }
 
 document.getElementById('interactive-navigate')?.addEventListener('click', () => submitInteractiveAction({ type: 'navigate', url: document.getElementById('interactive-navigation-url').value }));
 document.getElementById('interactive-click')?.addEventListener('click', () => submitInteractiveAction({ type: 'click', selector: document.getElementById('interactive-selector').value }));
 document.getElementById('interactive-type')?.addEventListener('click', () => submitInteractiveAction({ type: 'type', selector: document.getElementById('interactive-type-selector').value, text: document.getElementById('interactive-type-text').value }));
+document.getElementById('interactive-scroll')?.addEventListener('click', () => {
+  const direction = document.getElementById('interactive-scroll-direction').value;
+  const pixels = Number(document.getElementById('interactive-scroll-pixels').value);
+  if (!Number.isInteger(pixels) || pixels < 1 || pixels > 800) {
+    document.getElementById('interactive-failure').textContent = 'Scroll distance must be an integer from 1 to 800 pixels.';
+    return;
+  }
+  submitInteractiveAction({ type: 'scroll', direction, pixels });
+});
 document.getElementById('interactive-screenshot')?.addEventListener('click', () => submitInteractiveAction({ type: 'screenshot' }));
 document.getElementById('interactive-cancel')?.addEventListener('click', async () => {
   if (!window.activeCase?.id) return;

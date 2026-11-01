@@ -1,14 +1,14 @@
 export function installInteractiveCardObserver() {
   const marker = '[trustlayer-ui-card-state]';
   const snapshot = reason => {
-    const view = document.getElementById('view-overview');
+    const view = document.getElementById('view-website');
     const card = document.getElementById('ov-interactive-browser-card');
     const status = document.getElementById('interactive-status');
     const cardStyle = card ? getComputedStyle(card) : null;
     console.info(marker + JSON.stringify({
       reason,
       path: location.pathname,
-      overviewActive: view?.classList.contains('active') ?? false,
+      websiteActive: view?.classList.contains('active') ?? false,
       cardExists: Boolean(card),
       cardParentId: card?.parentElement?.id || null,
       cardDisplay: cardStyle?.display || null,
@@ -18,7 +18,7 @@ export function installInteractiveCardObserver() {
   };
 
   const observe = () => {
-    const view = document.getElementById('view-overview');
+    const view = document.getElementById('view-website');
     const card = document.getElementById('ov-interactive-browser-card');
     if (!view || !card) return;
     snapshot('initial');

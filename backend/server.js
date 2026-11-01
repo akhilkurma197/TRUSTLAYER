@@ -14,7 +14,7 @@ import { InvestigationEngine, INSPECTION_MODE } from '../core/investigation_engi
 import { CASE_STATE } from '../core/case_schema.js';
 import { validateEvidenceEvent } from '../core/evidence_event.js';
 import { globalJobController } from '../core/investigators/live_job_controller.js';
-import { validateInteractiveAction, MAX_INTERACTIVE_SCREENSHOTS } from '../core/interactive_action.js';
+import { validateInteractiveAction, MAX_INTERACTIVE_SCREENSHOTS, MAX_INTERACTIVE_VIEWPORT_FRAME_BYTES } from '../core/interactive_action.js';
 import { redactSensitiveUrl } from '../core/investigators/url_redaction.js';
 import { createCaseAccessCredential, verifyCaseAccessCredential } from '../core/case_access.js';
 import { buildEvidenceReport } from '../core/evidence_report.js';
@@ -277,6 +277,7 @@ app.post('/api/cases', (req, res) => {
     status: icase.status,
     currentStage: icase.currentStage,
     inspectionMode: icase.schema.inspectionMode,
+    interactiveEnabled: icase.schema.interactiveSession?.enabled === true,
     createdAt: icase.schema.createdAt
   });
 });
@@ -338,14 +339,17 @@ app.post('/api/cases/:id/interactions', async (req, res) => {
     return res.status(400).json({ error: 'Invalid interaction action.', details: validation.errors });
   }
   if (req.body.action.type === 'screenshot' && icase.schema.interactiveSession.screenshotCount >= MAX_INTERACTIVE_SCREENSHOTS) return res.status(429).json({ error: 'Interactive screenshot limit reached.' });
-  if (!consumeLimit(requestBuckets, `interact:${req.socket.remoteAddress || 'unknown'}:${icase.id}`, { limit: 30, windowMs: 60_000 })) return res.status(429).json({ error: 'Interaction request rate limit reached.' });
+  const pointerMove = req.body.action.type === 'pointer_move';
+  if (!consumeLimit(requestBuckets, `interact:${req.socket.remoteAddress || 'unknown'}:${icase.id}`, {
+    limit: pointerMove ? 120 : 30, windowMs: 60_000
+  })) return res.status(429).json({ error: 'Interaction request rate limit reached.' });
   icase._publishInteractiveObservation?.({ type: 'action_accepted', observation: `Investigator ${req.body.action.type} action accepted for worker validation.` });
   const result = await globalJobController.interact(icase.id, req.body?.action);
   if (!result.ok) {
     icase._publishInteractiveObservation?.({ type: 'action_rejected', observation: 'Investigator action was rejected by the worker session or destination policy.' });
     return res.status(409).json({ error: result.error });
   }
-  icase.schema.interactiveSession.actionCount++;
+  if (!pointerMove) icase.schema.interactiveSession.actionCount++;
   icase.schema.interactiveSession.currentUrl = result.url || icase.schema.interactiveSession.currentUrl;
   if (result.screenshotBase64) {
     try {
@@ -367,6 +371,31 @@ app.post('/api/cases/:id/interactions', async (req, res) => {
   }
   icase._publishInteractiveObservation?.({ type: `action_${result.action}`, observation: `Investigator ${result.action} action completed.`, url: result.url });
   res.json({ ok: true, action: result.action, url: result.url, ...(result.typed ? { typed: true } : {}) });
+});
+
+app.get('/api/cases/:id/interactive-viewport', async (req, res) => {
+  const icase = findCase(req, res);
+  if (!icase) return res.status(404).json({ error: 'Interactive viewport unavailable.' });
+  if (!icase.schema.interactiveSession?.enabled || icase.schema.interactiveSession.status !== 'RUNNING' ||
+      icase.schema.liveInspection?.runtimeSessionActive !== true) {
+    return res.status(409).json({ error: 'Interactive viewport is unavailable.' });
+  }
+  if (!consumeLimit(requestBuckets, `viewport:${req.socket.remoteAddress || 'unknown'}:${icase.id}`, { limit: 2, windowMs: 1000 })) {
+    return res.status(429).json({ error: 'Interactive viewport refresh is rate limited.' });
+  }
+  const frame = await globalJobController.captureViewport(icase.id);
+  if (!frame?.ok || typeof frame.viewportBase64 !== 'string') return res.status(409).json({ error: 'Interactive viewport disconnected.' });
+  try {
+    const bytes = Buffer.from(frame.viewportBase64, 'base64');
+    if (bytes.length < 256 || bytes.length > MAX_INTERACTIVE_VIEWPORT_FRAME_BYTES || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[2] !== 0xff) {
+      return res.status(502).json({ error: 'Interactive viewport frame was rejected.' });
+    }
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Length', String(bytes.length));
+    return res.end(bytes);
+  } catch { return res.status(502).json({ error: 'Interactive viewport frame was rejected.' }); }
 });
 
 app.get('/api/cases/:id/interactive-artifacts/:artifactId', (req, res) => {

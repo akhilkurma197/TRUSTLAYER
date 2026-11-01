@@ -16,6 +16,9 @@ import { buildTypingControlFailureDiagnostic, logDiagnosticSafely, safeUiPath,
 import { installInteractiveCardObserver } from './helpers/interactive_card_observer.js';
 import { summarizeInteractionFailure } from './helpers/interactive_failure_summary.js';
 import { prepareTypingActionInputs } from './helpers/typing_action_inputs.js';
+import { viewportFixtureCssPosition } from './helpers/viewport_fixture_target.js';
+import { readDisplayedViewportFrame } from './helpers/displayed_viewport_frame.js';
+import { hasVisibleTextChangeAfter, latestVisibleTextState } from './helpers/fixture_dom_change.js';
 import { fixtureCredentialMarker, summarizeFixtureCredentialObservations } from './helpers/fixture_credential_marker.js';
 import { isExpectedCancelledEventStreamAbort } from './helpers/expected_sse_abort.js';
 import { classifyConsoleError, isExpectedCaseCreationAuthChallenge } from './helpers/console_error_classification.js';
@@ -142,10 +145,12 @@ function printRuntimeFailureDiagnostics({ caseId, status, error, browserContaine
 }
 
 function fixtureScript() {
-  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Trust Layer Local Fixture</title></head>
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Trust Layer Local Fixture</title><style>
+body{margin:0}#state{position:fixed;left:50px;top:50px}#change{position:fixed;left:50px;top:100px}#note{position:fixed;left:50px;top:160px}
+</style></head>
 <body><h1>Local interactive fixture</h1><p id="state">State: ready</p>
 <button id="change" type="button" onclick="document.getElementById('state').textContent='State: changed for local test';">Change state</button>
-<label for="note">Local note</label><input id="note" type="text" autocomplete="off"></body></html>`;
+<label for="note">Local note</label><input id="note" type="text" autocomplete="off" oninput="document.getElementById('state').textContent='State: text entered for local test';"></body></html>`;
   return `const http=require('node:http');const html=${JSON.stringify(html)};const credentialMarker=${fixtureCredentialMarker.toString()};http.createServer((req,res)=>{console.log(credentialMarker(req.headers));if(req.method!=='GET'){res.writeHead(405);return res.end()}res.writeHead(200,{'content-type':'text/html; charset=utf-8','content-length':Buffer.byteLength(html),'cache-control':'no-store'});res.end(html)}).listen(${fixturePort},'0.0.0.0',()=>console.log('TRUSTLAYER_FIXTURE_READY'))`;
 }
 
@@ -374,7 +379,7 @@ async function readInteractiveUiSnapshotBounded(page, timeoutMs = 750) {
 }
 
 async function prepareTypingControlForClick(page, onOperation = () => {}) {
-  const view = page.locator('#view-overview');
+  const view = page.locator('#view-website');
   const card = view.locator('#ov-interactive-browser-card');
   const button = card.locator('#interactive-type');
   const step = async (name, run) => {
@@ -630,7 +635,9 @@ test('opt-in Playwright UI workflow through the local Mode C fixture, supervisor
         appResponses.push({ url: response.url(), path: new URL(response.url()).pathname,
           method: response.request().method(), resourceType: response.request().resourceType(),
           operatorSessionCookiePresent: /(?:^|;\s*)trustlayer_session=/.test(responseCookies),
-          status: response.status(), phase: workflowPhase, response });
+          status: response.status(), contentType: response.headers()['content-type'] || 'missing',
+          contentLength: response.headers()['content-length'] || null,
+          phase: workflowPhase, receivedAt: Date.now(), response });
       }
     });
     uiPage.on('console', message => {
@@ -686,16 +693,25 @@ test('opt-in Playwright UI workflow through the local Mode C fixture, supervisor
     workflowPhase = 'console';
     const consoleResponse = await uiPage.goto(`${base}/investigation.html`, { waitUntil: 'domcontentloaded', timeout: 10_000 });
     assert.equal(consoleResponse.status(), 200);
-    assert.equal(await uiPage.locator('#mode-c-interactive-optin').isChecked(), false,
+    assert.equal(await uiPage.locator('#intake-mode-c-interactive-optin').isChecked(), false,
       'interactive inspection must be unchecked by default');
     await uiPage.locator('#btn-hdr-mode-c').click();
     assert.equal(await uiPage.locator('input[name="inspection-mode"][value="ISOLATED_LIVE"]').isChecked(), true);
+    const interactiveOptIn = uiPage.locator('#intake-mode-c-interactive-optin');
+    assert.equal(await interactiveOptIn.isEnabled(), true, 'Mode C opt-in is selectable before case creation');
+    await uiPage.locator('label[for="intake-mode-c-interactive-optin"]').click();
+    assert.equal(await interactiveOptIn.isChecked(), true, 'clicking the option label checks the input');
+    await uiPage.locator('label[for="intake-mode-c-interactive-optin"]').click();
+    assert.equal(await interactiveOptIn.isChecked(), false, 'clicking the option label again unchecks the input');
+    await interactiveOptIn.check();
+    assert.equal(await interactiveOptIn.isChecked(), true);
     await uiPage.locator('#intake-input').fill(fixtureUrl);
     await uiPage.locator('#intake-submit-btn').click();
     await uiPage.locator('#mode-c-consent-modal').waitFor({ state: 'visible', timeout: 5_000 });
-    assert.equal(await uiPage.locator('#mode-c-interactive-optin').isChecked(), false,
-      'interactive consent must require an explicit operator action');
-    await uiPage.locator('#mode-c-interactive-optin').check();
+    assert.equal(await uiPage.locator('#mode-c-interactive-consent-summary').isVisible(), true,
+      'the authorization modal must reflect the pre-creation opt-in without offering case conversion');
+    assert.equal(await uiPage.locator('#mode-c-consent-modal #intake-mode-c-interactive-optin').count(), 0,
+      'the authorization modal must not offer an interactive flag that could convert an existing case');
     await uiPage.locator('#mode-c-capture-delay').selectOption('0');
     workflowPhase = 'case-creation';
     const authFlowResponseOffset = appResponses.length;
@@ -754,13 +770,14 @@ test('opt-in Playwright UI workflow through the local Mode C fixture, supervisor
     recordTimeline('interactive-card-wait-started');
     const cardWaitStartedAt = performance.now();
     try {
-      const card = uiPage.locator('#view-overview #ov-interactive-browser-card');
+      await uiPage.locator('.nav-item[data-view="website"]').click();
+      const card = uiPage.locator('#view-website #ov-interactive-browser-card');
       await card.waitFor({ state: 'visible', timeout: 5_000 });
-      const initialInteractiveStatus = await uiPage.locator('#view-overview #interactive-status').innerText({ timeout: 1_000 });
+      const initialInteractiveStatus = await uiPage.locator('#view-website #interactive-status').innerText({ timeout: 1_000 });
       assert.ok(['STARTING', 'RUNNING'].includes(initialInteractiveStatus),
         `accepted interactive case must render a recognized live state, got ${initialInteractiveStatus}`);
       if (initialInteractiveStatus === 'STARTING') {
-        for (const id of ['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-screenshot', 'interactive-cancel']) {
+        for (const id of ['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel']) {
           assert.equal(await card.locator(`#${id}`).isDisabled(), true,
             `${id} must remain disabled until the backend confirms the worker start handshake`);
         }
@@ -918,6 +935,16 @@ test('opt-in Playwright UI workflow through the local Mode C fixture, supervisor
       throw error;
     }
     recordTimeline('ui-interaction-controls-enabled');
+    const fallbackControls = uiPage.locator('#ov-interactive-browser-card details');
+    if (!(await fallbackControls.evaluate(details => details.open))) {
+      await fallbackControls.locator('summary').click();
+    }
+    assert.equal(await fallbackControls.evaluate(details => details.open), true,
+      'the visible fallback disclosure must be opened through its UI summary before preparing selector-based typing');
+    assert.equal(await uiPage.locator('#interactive-type-selector').isVisible(), true,
+      'the selector field must be visible before the fixture fills it');
+    assert.equal(await uiPage.locator('#interactive-type-text').isVisible(), true,
+      'the text field must be visible before the fixture fills it');
     workflowPhase = 'interaction-input-preflight';
     const typeInputPreparationStartedAt = performance.now();
     try {
@@ -1046,7 +1073,7 @@ test('opt-in Playwright UI workflow through the local Mode C fixture, supervisor
     assert.equal(firstCookie.sameSite, 'Strict');
     assert.equal(firstCookie.secure, false, 'test server uses HTTP; production adds Secure for HTTPS');
     const optInCheckStartedAt = performance.now();
-    assert.equal(await uiPage.locator('#mode-c-interactive-optin').isChecked(), true);
+    assert.equal(await uiPage.locator('#intake-mode-c-interactive-optin').isChecked(), true);
     recordTimeline('interactive-opt-in-confirmed', {
       durationMs: Math.max(0, Math.round(performance.now() - optInCheckStartedAt))
     });
@@ -1086,6 +1113,108 @@ test('opt-in Playwright UI workflow through the local Mode C fixture, supervisor
     assert.ok(beforeScreenshotBytes.length > 1000 && beforeScreenshotBytes.length <= 5 * 1024 * 1024);
     assert.deepEqual([...beforeScreenshotBytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
 
+    const viewportPath = `/api/cases/${first.caseId}/interactive-viewport`;
+    const viewportResponse = await waitFor(() => appResponses.filter(item => item.path === viewportPath && item.status === 200).at(-1)?.response,
+      'authenticated isolated viewport frame', 10_000);
+    assert.match(viewportResponse.headers()['content-type'] || '', /image\/jpeg/);
+    const initialContentLength = Number(viewportResponse.headers()['content-length']);
+    assert.ok(initialContentLength >= 256 && initialContentLength <= 512 * 1024,
+      `successful viewport response must advertise a non-empty bounded JPEG body; Content-Length=${viewportResponse.headers()['content-length'] || 'missing'}`);
+    const liveViewport = uiPage.locator('#interactive-live-viewport');
+    await waitFor(() => liveViewport.evaluate(image => image.complete && image.naturalWidth === 1280 && image.naturalHeight === 800),
+      'live worker viewport displayed in the Website view', 10_000);
+    const baselineViewportFrame = await readDisplayedViewportFrame(liveViewport);
+    assert.equal(baselineViewportFrame?.type, 'image/jpeg');
+    assert.ok(baselineViewportFrame.bytes >= 256 && baselineViewportFrame.bytes <= 512 * 1024,
+      `displayed viewport blob must contain bounded JPEG bytes; received ${baselineViewportFrame?.bytes ?? 'no frame'}`);
+    assert.equal(baselineViewportFrame.width, 1280);
+    assert.equal(baselineViewportFrame.height, 800);
+    const baselineViewportHash = baselineViewportFrame.sha256;
+    const beforeViewportClick = await getCase(base, operatorToken, first);
+    const viewportClickBaselineState = latestVisibleTextState(validateCaseEvents(beforeViewportClick));
+    assert.ok(viewportClickBaselineState, 'worker must have published a DOM state observation before viewport click');
+    const sendViewportAction = (type) => uiPage.waitForResponse(response => {
+      if (new URL(response.url()).pathname !== `/api/cases/${first.caseId}/interactions` || response.request().method() !== 'POST') return false;
+      try { return response.request().postDataJSON()?.action?.type === type; } catch { return false; }
+    }, { timeout: 10_000 });
+    const viewportMetrics = await liveViewport.evaluate(image => {
+      const rect = image.getBoundingClientRect();
+      return { box: { width: rect.width, height: rect.height }, viewport: { width: image.naturalWidth, height: image.naturalHeight } };
+    });
+    const clickPoint = viewportFixtureCssPosition(viewportMetrics.box, { x: 80, y: 110 }, viewportMetrics.viewport);
+    recordTimeline('viewport-fixture-click-coordinate', {
+      cssX: Math.round(clickPoint.x * 100) / 100, cssY: Math.round(clickPoint.y * 100) / 100,
+      workerX: 80, workerY: 110, viewportWidth: 1280, viewportHeight: 800
+    });
+    const viewportClickResponsePromise = sendViewportAction('pointer_click');
+    await liveViewport.click({ position: clickPoint, timeout: 5_000 });
+    const viewportClickResponse = await viewportClickResponsePromise;
+    let clickActionResult = {};
+    try {
+      const body = await viewportClickResponse.json();
+      clickActionResult = { ok: body.ok === true, action: body.action === 'pointer_click' ? body.action : 'unexpected' };
+    } catch { clickActionResult = { responseBody: 'unavailable' }; }
+    assert.equal(viewportClickResponse.status(), 200,
+      `a normal click on the live viewport must reach the isolated worker; safe response=${JSON.stringify(clickActionResult)}`);
+    assert.equal(clickActionResult.ok, true, 'the isolated worker must complete the viewport click');
+    assert.equal(clickActionResult.action, 'pointer_click');
+    const viewportClickState = await waitFor(async () => {
+      const current = await getCase(base, operatorToken, first);
+      return hasVisibleTextChangeAfter(validateCaseEvents(current), viewportClickBaselineState) ? current : null;
+    }, 'observable fixture text state change after viewport click');
+    const viewportClickObservedState = latestVisibleTextState(validateCaseEvents(viewportClickState));
+    recordTimeline('viewport-click-dom-state-observed', {
+      priorEventSequence: viewportClickBaselineState.sequence,
+      priorVisibleTextLength: viewportClickBaselineState.visibleTextLength,
+      observedEventSequence: viewportClickObservedState?.sequence ?? null,
+      observedVisibleTextLength: viewportClickObservedState?.visibleTextLength ?? null
+    });
+    const viewportClickAt = Date.now();
+    let changedViewportHash;
+    try {
+      changedViewportHash = await waitFor(async () => {
+        const frame = await readDisplayedViewportFrame(liveViewport);
+        return frame?.sha256 && frame.sha256 !== baselineViewportHash ? frame.sha256 : null;
+      }, 'viewport frame reflecting the isolated mouse click', 10_000);
+    } catch (error) {
+      const frameResponses = [];
+      for (const entry of appResponses.filter(item => item.path === viewportPath && item.receivedAt > viewportClickAt).slice(-8)) {
+        frameResponses.push({ status: entry.status, receivedAt: entry.receivedAt,
+          contentType: entry.contentType, contentLength: entry.contentLength });
+      }
+      let displayedFrame = null;
+      try { displayedFrame = await readDisplayedViewportFrame(liveViewport); } catch {}
+      recordTimeline('viewport-click-frame-timeout', {
+        actionHttpStatus: viewportClickResponse.status(), ...clickActionResult,
+        baselineHashPrefix: baselineViewportHash.slice(0, 12), frameResponseCount: frameResponses.length,
+        displayedFrame: displayedFrame && { type: displayedFrame.type, bytes: displayedFrame.bytes,
+          hashPrefix: displayedFrame.sha256?.slice(0, 12) || null, width: displayedFrame.width, height: displayedFrame.height },
+        frameResponses, elapsedAfterClickMs: Math.max(0, Date.now() - viewportClickAt)
+      });
+      throw new Error(`viewport frame did not change after worker click (HTTP ${viewportClickResponse.status()}, action=${clickActionResult.action || 'unknown'}, newFrames=${frameResponses.length}, lastContentLength=${frameResponses.at(-1)?.contentLength || 'missing'}, baseline=${baselineViewportHash.slice(0, 12)}, displayed=${displayedFrame?.sha256?.slice(0, 12) || 'unavailable'}): ${error.message}`);
+    }
+
+    const viewportInputClickPromise = sendViewportAction('pointer_click');
+    const inputMetrics = await liveViewport.evaluate(image => {
+      const rect = image.getBoundingClientRect();
+      return { box: { width: rect.width, height: rect.height }, viewport: { width: image.naturalWidth, height: image.naturalHeight } };
+    });
+    const inputPoint = viewportFixtureCssPosition(inputMetrics.box, { x: 80, y: 175 }, inputMetrics.viewport);
+    await liveViewport.click({ position: inputPoint, timeout: 5_000 });
+    assert.equal((await viewportInputClickPromise).status(), 200, 'the viewport must focus the safe local text field');
+    await uiPage.locator('#interactive-viewport-shell').focus();
+    const focusedTextPromise = sendViewportAction('type_focused');
+    const enterKeyPromise = sendViewportAction('key');
+    await uiPage.keyboard.type('local viewport query');
+    await uiPage.keyboard.press('Enter');
+    assert.equal((await focusedTextPromise).status(), 200, 'buffered harmless text must reach the focused worker field');
+    assert.equal((await enterKeyPromise).status(), 200, 'Enter must submit through the isolated worker');
+    const textViewportHash = await waitFor(async () => {
+      const frame = await readDisplayedViewportFrame(liveViewport);
+      return frame?.sha256 && frame.sha256 !== changedViewportHash ? frame.sha256 : null;
+    }, 'viewport frame reflecting isolated keyboard input', 10_000);
+    assert.notEqual(textViewportHash, changedViewportHash);
+
     await uiPage.locator('#interactive-selector').fill('#change');
     const clickResponse = await clickForApiResponse({ page: uiPage, button: uiPage.locator('#interactive-click'), caseId: first.caseId,
       base, pathname: `/api/cases/${first.caseId}/interactions`, appRequests, appResponses,
@@ -1101,13 +1230,8 @@ test('opt-in Playwright UI workflow through the local Mode C fixture, supervisor
     'the browser UI must receive a real evidence event through its native SSE connection');
     assert.ok(appRequests.some(request => new URL(request.url).pathname === `/api/cases/${first.caseId}/events`),
       'the UI must establish its authenticated case event stream');
-    const afterClickSchema = await waitFor(async () => {
-      const current = await getCase(base, operatorToken, first);
-      const events = validateCaseEvents(current);
-      const changes = events.filter(event => event.type === 'dom_change')
-        .map(event => Number(/visibleTextLength":(\d+)/.exec(event.observation)?.[1])).filter(Number.isFinite);
-      return changes.length >= 2 && changes.at(-1) > changes[0] ? current : null;
-    }, 'observable fixture page state change');
+    const afterClickSchema = await getCase(base, operatorToken, first);
+    validateCaseEvents(afterClickSchema);
     const browserEvent = await firstEvents.waitFor(message => message.event === 'evidence_event' &&
       ['dom_change', 'user_action'].includes(message.data?.type), 'browser event delivery over authenticated SSE');
     assert.ok(browserEvent.data.investigationId === first.caseId);
@@ -1185,6 +1309,10 @@ test('opt-in Playwright UI workflow through the local Mode C fixture, supervisor
     }, 'cancelled investigation state', 10_000);
     assert.equal(await uiPage.locator('#interactive-status').innerText(), 'CANCELLED',
       'the console must display the actual cancelled session state');
+    const stoppedViewport = await fetch(`${base}/api/cases/${first.caseId}/interactive-viewport`, {
+      headers: { Authorization: `Bearer ${operatorToken}`, 'X-TrustLayer-Case-Access': first.caseAccessToken }
+    });
+    assert.equal(stoppedViewport.status, 409, 'viewport frames and inputs must stop when the case is cancelled');
     await firstEvents.close();
     const oldBrowserName = firstHandle.browserContainerName;
     const oldProxyName = firstHandle.egressContainerName;
@@ -1210,7 +1338,8 @@ test('opt-in Playwright UI workflow through the local Mode C fixture, supervisor
 
     for (const route of [
       `/api/cases/${second.caseId}/events`,
-      `/api/cases/${second.caseId}/interactive-artifacts/${shot.artifactId}`
+      `/api/cases/${second.caseId}/interactive-artifacts/${shot.artifactId}`,
+      `/api/cases/${second.caseId}/interactive-viewport`
     ]) {
       const denied = await fetch(`${base}${route}`, { headers: { Authorization: `Bearer ${operatorToken}`,
         'X-TrustLayer-Case-Access': first.caseAccessToken } });

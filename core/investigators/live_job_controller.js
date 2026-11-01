@@ -20,7 +20,8 @@ import { fileURLToPath } from 'node:url';
 import { execFileAsync } from '../async_process.js';
 import { SSRFGuard } from './ssrf_guard.js';
 import { hasVerifiedChromiumSandbox } from './chromium_sandbox_status.js';
-import { validateInteractiveAction, MAX_INTERACTIVE_ACTIONS, INTERACTION_TIMEOUT_MS, MAX_SESSION_MS } from '../interactive_action.js';
+import { validateInteractiveAction, MAX_INTERACTIVE_ACTIONS, MAX_INTERACTIVE_POINTER_MOVES, MAX_INTERACTIVE_VIEWPORT_FRAMES,
+  INTERACTION_TIMEOUT_MS, MAX_SESSION_MS } from '../interactive_action.js';
 import { validateTestLocalFixturePolicyFromProcess, validateTestLocalFixtureUrl } from './test_local_fixture.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -584,10 +585,8 @@ export class LiveJobController {
       ];
       child = spawn('docker', dockerArgs, { stdio: [job.options?.interactive ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
 
-      let stdout = '';
       let stderr = '';
       const appendBounded = (current, chunk) => (current + chunk.toString('utf8')).slice(-64 * 1024);
-      if (child.stdout) child.stdout.on('data', (d) => { stdout = appendBounded(stdout, d); });
       if (child.stderr) child.stderr.on('data', (d) => { stderr = appendBounded(stderr, d); });
 
       const jobHandle = {
@@ -617,6 +616,9 @@ export class LiveJobController {
         workerClosedAt: null,
         interactiveEndedAt: null,
         pendingInteractions: new Map(),
+        pointerMoveCount: 0,
+        viewportCaptureCount: 0,
+        lastViewportCaptureAt: 0,
         publishInitialScreenshot,
         get initialScreenshotWatcher() { return initialScreenshotWatcher; },
         get readyResultWatcher() { return readyResultWatcher; },
@@ -959,7 +961,14 @@ export class LiveJobController {
         !Number.isFinite(handle.sessionDeadline) || Date.now() >= handle.sessionDeadline) {
       return { ok: false, error: 'Interactive browser session is unavailable.' };
     }
-    if (handle.interactionCount >= MAX_INTERACTIVE_ACTIONS) return { ok: false, error: 'Interaction limit reached.' };
+    if (action.type === 'pointer_move') {
+      handle.pointerMoveCount = Number.isSafeInteger(handle.pointerMoveCount) ? handle.pointerMoveCount : 0;
+      if (handle.pointerMoveCount >= MAX_INTERACTIVE_POINTER_MOVES) return { ok: false, error: 'Pointer movement limit reached.' };
+      handle.pointerMoveCount++;
+    } else {
+      if (handle.interactionCount >= MAX_INTERACTIVE_ACTIONS) return { ok: false, error: 'Interaction limit reached.' };
+      handle.interactionCount++;
+    }
     if (action.type === 'navigate') {
       let checked;
       try { checked = await this.validateDestination(action.url); }
@@ -967,7 +976,6 @@ export class LiveJobController {
       if (!checked.allowed) return { ok: false, error: 'Navigation was blocked by destination policy.' };
       action = { type: 'navigate', url: checked.canonicalUrl };
     }
-    handle.interactionCount++;
     const requestId = randomUUID();
     return new Promise(resolve => {
       const timer = setTimeout(() => {
@@ -978,6 +986,36 @@ export class LiveJobController {
       handle.pendingInteractions.set(requestId, { resolve, timer });
       try { handle.child.stdin.write(`${JSON.stringify({ requestId, action })}\n`); }
       catch { clearTimeout(timer); handle.pendingInteractions.delete(requestId); resolve({ ok: false, error: 'Interactive browser session is unavailable.' }); }
+    });
+  }
+
+  async captureViewport(caseId) {
+    const handle = [...this.activeJobs.values()].find(item => item.job?.caseId === caseId && item.interactive);
+    if (!handle || !handle.interactiveReady || !handle.interactiveStarted || !handle.child?.stdin || handle.child.exitCode !== null ||
+        !Number.isFinite(handle.sessionDeadline) || Date.now() >= handle.sessionDeadline) {
+      return { ok: false, error: 'Interactive browser session is unavailable.' };
+    }
+    const now = Date.now();
+    handle.viewportCaptureCount = Number.isSafeInteger(handle.viewportCaptureCount) ? handle.viewportCaptureCount : 0;
+    handle.lastViewportCaptureAt = Number.isFinite(handle.lastViewportCaptureAt) ? handle.lastViewportCaptureAt : 0;
+    if (now - handle.lastViewportCaptureAt < 400 || handle.viewportCaptureCount >= MAX_INTERACTIVE_VIEWPORT_FRAMES) {
+      return { ok: false, error: 'Viewport capture is rate limited.' };
+    }
+    handle.lastViewportCaptureAt = now;
+    handle.viewportCaptureCount++;
+    const requestId = randomUUID();
+    return new Promise(resolve => {
+      const timer = setTimeout(() => {
+        handle.pendingInteractions.delete(requestId);
+        resolve({ ok: false, error: 'Viewport capture timed out.' });
+      }, INTERACTION_TIMEOUT_MS);
+      handle.pendingInteractions.set(requestId, { resolve, timer });
+      try { handle.child.stdin.write(`${JSON.stringify({ command: 'CAPTURE_VIEWPORT', requestId })}\n`); }
+      catch {
+        clearTimeout(timer);
+        handle.pendingInteractions.delete(requestId);
+        resolve({ ok: false, error: 'Interactive browser session is unavailable.' });
+      }
     });
   }
 
