@@ -1,0 +1,7 @@
+# Offline-only derivative of the already prepared worker image for the opt-in
+# local-fixture integration test. This never pulls a base image or installs packages.
+FROM trustlayer-worker:latest
+USER root
+COPY --chown=pwuser:pwuser core/ /home/pwuser/app/core/
+COPY --chown=pwuser:pwuser worker/ /home/pwuser/app/worker/
+USER pwuser

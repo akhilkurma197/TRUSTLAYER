@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,9 +16,10 @@ test('Mode C API returns a case-linked rendered screenshot artifact', { skip: !e
   // to screenshot latency measurement below.
   new LiveJobController()._ensureDockerRuntime();
   const port = 43000 + (process.pid % 1000);
+  const apiToken = randomBytes(32).toString('base64url');
   const server = spawn(process.execPath, ['backend/server.js'], {
     cwd: rootDir,
-    env: { ...process.env, PORT: String(port) },
+    env: { ...process.env, PORT: String(port), TRUSTLAYER_API_TOKEN: apiToken },
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -26,11 +28,19 @@ test('Mode C API returns a case-linked rendered screenshot artifact', { skip: !e
   server.stdout.on('data', chunk => { serverOutput += chunk; });
   server.stderr.on('data', chunk => { serverOutput += chunk; });
   const baseUrl = `http://127.0.0.1:${port}`;
+  let caseAccessToken = null;
+  const apiFetch = (url, options = {}) => fetch(url, {
+    ...options,
+    headers: { ...options.headers, Authorization: `Bearer ${apiToken}`,
+      ...(caseAccessToken ? { 'X-TrustLayer-Case-Access': caseAccessToken } : {}) }
+  });
   try {
     let ready = false;
     for (let attempt = 0; attempt < 60 && !ready; attempt++) {
       try {
-        const response = await fetch(`${baseUrl}/api/cases`);
+        const anonymous = await fetch(`${baseUrl}/api/cases`);
+        assert.equal(anonymous.status, 401);
+        const response = await apiFetch(`${baseUrl}/api/cases`);
         ready = response.ok;
       } catch {}
       if (!ready) await new Promise(resolve => setTimeout(resolve, 250));
@@ -38,7 +48,7 @@ test('Mode C API returns a case-linked rendered screenshot artifact', { skip: !e
     assert.ok(ready, 'backend API should start');
 
     const scanStartedAt = Date.now();
-    const createdResponse = await fetch(`${baseUrl}/api/cases`, {
+    const createdResponse = await apiFetch(`${baseUrl}/api/cases`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -51,7 +61,9 @@ test('Mode C API returns a case-linked rendered screenshot artifact', { skip: !e
     assert.equal(createdResponse.status, 201);
     const created = await createdResponse.json();
     cleanupCaseId = created.caseId;
-    const invalidDelayResponse = await fetch(`${baseUrl}/api/cases`, {
+    caseAccessToken = created.caseAccessToken;
+    assert.equal(typeof caseAccessToken, 'string', 'case creation must return its scoped access credential');
+    const invalidDelayResponse = await apiFetch(`${baseUrl}/api/cases`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ target: 'https://example.com', inspectionMode: 'ISOLATED_LIVE', consentConfirmed: true, captureDelayMs: 1234 })
     });
@@ -63,13 +75,13 @@ test('Mode C API returns a case-linked rendered screenshot artifact', { skip: !e
     for (let attempt = 0; attempt < 600; attempt++) {
       let response;
       try {
-        response = await fetch(`${baseUrl}/api/cases/${created.caseId}`);
+        response = await apiFetch(`${baseUrl}/api/cases/${created.caseId}`);
       } catch (error) {
         throw new Error(`Backend connection failed while waiting for case. ${error.message}; cause=${error.cause?.code || ''} ${error.cause?.message || ''}; exited=${server.exitCode}; signal=${server.signalCode}\n${serverOutput}`);
       }
       schema = await response.json();
       if (schema.initialScreenshotUrl && earlyScreenshotReadyMs === null) {
-        const earlyImage = await fetch(`${baseUrl}${schema.initialScreenshotUrl}`);
+        const earlyImage = await apiFetch(`${baseUrl}${schema.initialScreenshotUrl}`);
         if (earlyImage.ok && /image\/png/.test(earlyImage.headers.get('content-type') || '')) {
           const earlyBytes = Buffer.from(await earlyImage.arrayBuffer());
           assert.ok(earlyBytes.length > 1000, 'initial screenshot must contain image data');
@@ -84,7 +96,9 @@ test('Mode C API returns a case-linked rendered screenshot artifact', { skip: !e
 
     assert.equal(schema.status, 'COMPLETED', `Case did not complete: ${JSON.stringify({ status: schema.status, currentStage: schema.currentStage, initialScreenshotUrl: schema.initialScreenshotUrl, liveStatus: schema.liveInspection?.status, liveErrors: schema.liveInspection?.errors, renderStatus: schema.renderStatus, errors: schema.errors, logs: schema.logs?.slice(-10) })}\n${serverOutput}`);
     assert.equal(schema.inspectionMode, 'ISOLATED_LIVE');
-    assert.equal(schema.liveInspection?.status, 'SUCCESS');
+    if ([401, 403].includes(schema.liveInspection?.httpStatus)) assert.equal(schema.liveInspection?.status, 'BLOCKED');
+    else if (Number(schema.liveInspection?.httpStatus) >= 400) assert.equal(schema.liveInspection?.status, 'HTTP_ERROR');
+    else assert.equal(schema.liveInspection?.status, 'SUCCESS');
     assert.equal(schema.liveInspection?.isolationReport?.runtimeMode, 'CONTAINER_DOCKER');
     assert.equal(schema.liveInspection?.isolationReport?.chromiumSandboxEnabled, true);
     assert.equal(schema.liveInspection?.isolationReport?.capabilityPolicy, 'ALL_DROPPED_EXCEPT_SYS_CHROOT');
@@ -157,21 +171,21 @@ test('Mode C API returns a case-linked rendered screenshot artifact', { skip: !e
     assert.equal(evidence?.data?.artifactUrl, schema.screenshotArtifactUrl);
     assert.match(evidence?.data?.sha256 || '', /^[a-f0-9]{64}$/);
 
-    const screenshotResponse = await fetch(`${baseUrl}${schema.screenshotArtifactUrl}`);
+    const screenshotResponse = await apiFetch(`${baseUrl}${schema.screenshotArtifactUrl}`);
     assert.equal(screenshotResponse.status, 200);
     assert.match(screenshotResponse.headers.get('content-type') || '', /image\/png/);
     const bytes = Buffer.from(await screenshotResponse.arrayBuffer());
     assert.ok(bytes.length > 1000);
     assert.deepEqual([...bytes.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     assert.equal(schema.liveInspection?.runtimeSessionActive, true, 'isolated browser should remain available after case results are published');
-    const stopSession = await fetch(`${baseUrl}/api/cases/${created.caseId}/cancel-live`, { method: 'POST' });
+    const stopSession = await apiFetch(`${baseUrl}/api/cases/${created.caseId}/cancel-live`, { method: 'POST' });
     assert.equal(stopSession.status, 200);
-    const stoppedCase = await (await fetch(`${baseUrl}/api/cases/${created.caseId}`)).json();
+    const stoppedCase = await (await apiFetch(`${baseUrl}/api/cases/${created.caseId}`)).json();
     assert.equal(stoppedCase.status, 'COMPLETED', 'stopping the retained browser session must preserve the finished case');
     assert.equal(stoppedCase.liveInspection?.runtimeSessionActive, false);
   } finally {
     if (cleanupCaseId) {
-      try { await fetch(`${baseUrl}/api/cases/${cleanupCaseId}/cancel-live`, { method: 'POST' }); } catch {}
+      try { await apiFetch(`${baseUrl}/api/cases/${cleanupCaseId}/cancel-live`, { method: 'POST' }); } catch {}
     }
     server.kill();
   }

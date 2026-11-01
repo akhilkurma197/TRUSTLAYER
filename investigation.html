@@ -478,6 +478,33 @@ html, body { height: 100%; overflow: hidden; background: var(--bg-deep); color: 
           <div id="ov-summary-content" style="font-family:var(--font-mono);font-size:11px;line-height:1.6;color:var(--text-primary);white-space:pre-wrap;"></div>
         </div>
 
+        <div class="card" id="ov-evidence-report-card" style="margin-top:12px;">
+          <div class="card-header"><span class="card-title">Evidence-grounded finding</span><span class="badge UNKNOWN" id="ov-report-scope">WAITING</span></div>
+          <div id="ov-report-status" style="font-size:12px;color:var(--text-secondary);">The structured report will appear when case evidence is available.</div>
+          <div id="ov-report-reasons" style="margin-top:8px;font-size:11px;line-height:1.6;"></div>
+          <div id="ov-report-conflicts" style="margin-top:8px;color:#fbbf24;font-size:10.5px;line-height:1.5;"></div>
+          <div id="ov-report-limitations" style="margin-top:8px;color:#fbbf24;font-size:10.5px;line-height:1.5;"></div>
+          <div id="ov-report-next" style="margin-top:8px;color:var(--blue);font-size:11px;"></div>
+        </div>
+
+        <div class="card" id="ov-interactive-browser-card" style="display:none;margin-top:12px;">
+          <div class="card-header"><span class="card-title">Isolated interactive browser</span><span class="badge UNKNOWN" id="interactive-status">NOT ENABLED</span></div>
+          <div id="interactive-failure" role="status" style="color:#fbbf24;font-size:11px;margin-bottom:8px;"></div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:6px;">
+            <input id="interactive-navigation-url" placeholder="https://destination (proxy validated)" aria-label="Navigation URL" maxlength="4096">
+            <button class="btn" id="interactive-navigate">Navigate</button>
+            <input id="interactive-selector" placeholder="Visible button selector" aria-label="Visible button CSS selector" maxlength="160">
+            <button class="btn" id="interactive-click">Click permitted button</button>
+            <input id="interactive-type-selector" placeholder="Standalone text field selector" aria-label="Text field CSS selector" maxlength="160">
+            <input id="interactive-type-text" placeholder="Non-sensitive text only" aria-label="Non-sensitive text" maxlength="200">
+            <button class="btn" id="interactive-type">Type bounded text</button>
+            <button class="btn" id="interactive-screenshot">Capture screenshot</button>
+            <button class="btn btn-danger" id="interactive-cancel">Stop browser</button>
+          </div>
+          <img id="interactive-screenshot-preview" alt="Authorized isolated browser screenshot" style="display:none;max-width:100%;max-height:480px;margin-top:10px;border:1px solid var(--border);">
+          <div id="interactive-events" aria-live="polite" style="max-height:180px;overflow:auto;margin-top:10px;font:10px/1.5 var(--font-mono);color:var(--text-secondary);"></div>
+        </div>
+
         <!-- Trust Breakpoints Container -->
         <div id="ov-breakpoints-container"></div>
 
@@ -1145,6 +1172,12 @@ html, body { height: 100%; overflow: hidden; background: var(--bg-deep); color: 
         </select>
       </label>
 
+      <label style="display:flex;align-items:flex-start;gap:9px;padding:10px 12px;border:1px solid rgba(56,189,248,.3);border-radius:6px;color:#cbd5e1;font-size:11px;line-height:1.5;">
+        <input type="checkbox" id="mode-c-interactive-optin" style="margin-top:2px;">
+        <span><strong style="display:block;color:#38bdf8;">Enable bounded interactive browser controls</strong>Optional. The isolated browser may accept only existing bounded actions. Never enter passwords, payment data, or other secrets.</span>
+      </label>
+      <div id="mode-c-interactive-upgrade-note" style="display:none;color:#fbbf24;font-size:11px;">Interactive controls must be enabled when the case is created; this existing case cannot be converted.</div>
+
       <div style="display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-top:8px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.08);">
         <button class="btn" onclick="closeModeCConsentModal()" style="padding:9px 18px;background:rgba(255,255,255,0.08);color:#cbd5e1;border:1px solid rgba(255,255,255,0.15);border-radius:6px;cursor:pointer;font-weight:600;">Cancel</button>
         <button class="btn" id="modal-confirm-btn" style="background:#eab308 !important;color:#000000 !important;font-weight:800 !important;font-size:12.5px !important;border:1px solid #facc15 !important;padding:10px 24px !important;cursor:pointer !important;border-radius:6px !important;box-shadow:0 0 20px rgba(234,179,8,0.6) !important;letter-spacing:0.3px !important;display:inline-flex !important;align-items:center !important;gap:8px !important;">
@@ -1169,6 +1202,28 @@ html, body { height: 100%; overflow: hidden; background: var(--bg-deep); color: 
 </div>
 
 <!-- JAVASCRIPT: APPLICATION LOGIC — pure browser JS, no Node imports -->
+<script>
+  window.trustLayerApiFetch = async function(url, options = {}) {
+    const response = await fetch(url, options);
+    if (response.status !== 401) return response;
+    if (!window.__trustLayerAuthPromise) {
+      window.__trustLayerAuthPromise = (async () => {
+        const token = window.prompt('Enter the Trust Layer API token configured by the server operator:');
+        if (!token) return false;
+        const login = await fetch('/api/auth/session', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token })
+        });
+        if (!login.ok) window.alert('Trust Layer API authentication failed. Check the token and try again.');
+        return login.ok;
+      })();
+    }
+    const authenticated = await window.__trustLayerAuthPromise;
+    if (!authenticated) { window.__trustLayerAuthPromise = null; return response; }
+    const retry = await fetch(url, options);
+    if (retry.status === 401) { window.__trustLayerAuthPromise = null; window.alert('Trust Layer API session expired.'); }
+    return retry;
+  };
+</script>
 <script src="vendor/jsQR.js"></script>
 <script>
 'use strict';
@@ -1259,7 +1314,7 @@ casesDrawer.addEventListener('click', (e) => {
 async function loadRecentCasesList() {
   const container = document.getElementById('recent-cases-list');
   try {
-    const res = await fetch('/api/cases');
+    const res = await window.trustLayerApiFetch('/api/cases');
     const data = await res.json();
     if (!data.cases || data.cases.length === 0) {
       container.innerHTML = '<div class="empty-state">No prior cases recorded.</div>';
@@ -1283,7 +1338,9 @@ async function loadRecentCasesList() {
 window.loadCaseById = async function(id) {
   casesDrawer.classList.add('hidden');
   try {
-    const res = await fetch(`/api/cases/${id}`);
+    evidenceReportRequestKey = null;
+    interactiveLiveEvents = [];
+    const res = await window.trustLayerApiFetch(`/api/cases/${id}`);
     const schema = await res.json();
     window.activeCase = activeCase = { id: schema.id, target: schema.target, schema };
     updateCaseUI(schema);
@@ -1302,6 +1359,10 @@ let pendingLiveCaseId = null;
 function showModeCConsentModal(target, caseId = null) {
   pendingLiveTarget = target;
   pendingLiveCaseId = caseId;
+  const interactiveOptIn = document.getElementById('mode-c-interactive-optin');
+  const upgradeNote = document.getElementById('mode-c-interactive-upgrade-note');
+  if (interactiveOptIn) { interactiveOptIn.checked = false; interactiveOptIn.disabled = Boolean(caseId); }
+  if (upgradeNote) upgradeNote.style.display = caseId ? 'block' : 'none';
   const targetEl = document.getElementById('modal-target-url');
   if (targetEl) targetEl.textContent = target;
   const modal = document.getElementById('mode-c-consent-modal');
@@ -1325,6 +1386,7 @@ if (confirmModalBtn) {
   confirmModalBtn.addEventListener('click', async () => {
     const target = pendingLiveTarget;
     const caseId = pendingLiveCaseId;
+    const interactiveOptIn = !caseId && document.getElementById('mode-c-interactive-optin')?.checked === true;
     closeModeCConsentModal();
 
     if (caseId) {
@@ -1350,7 +1412,7 @@ if (confirmModalBtn) {
         }
         document.getElementById('sb-case-info').textContent = `Live Inspecting: ${target}`;
 
-        const res = await fetch(`/api/cases/${caseId}/live-inspect`, {
+        const res = await window.trustLayerApiFetch(`/api/cases/${caseId}/live-inspect`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ consentConfirmed: true, captureDelayMs: selectedModeCCaptureDelay() })
@@ -1368,7 +1430,7 @@ if (confirmModalBtn) {
       }
     } else if (target) {
       setHdrModeButtons('ISOLATED_LIVE');
-      runInvestigation(target, 'ISOLATED_LIVE', true, selectedModeCCaptureDelay());
+      runInvestigation(target, 'ISOLATED_LIVE', true, selectedModeCCaptureDelay(), interactiveOptIn);
     }
   });
 }
@@ -1507,13 +1569,13 @@ function pollLiveCaseUntilComplete(caseId) {
   const interval = setInterval(async () => {
     attempts++;
     try {
-      const res = await fetch('/api/cases/' + caseId);
+    const res = await window.trustLayerApiFetch('/api/cases/' + caseId);
       if (!res.ok) return;
       const schema = await res.json();
-      if (window.activeCase) window.activeCase.schema = schema;
-      updateCaseUI(schema);
+      const acceptedSchema = acceptCaseSchema(schema);
+      if (!acceptedSchema) return;
 
-      const done = schema.status === 'COMPLETED' || schema.status === 'INCOMPLETE' || schema.status === 'BLOCKED';
+      const done = acceptedSchema.status === 'COMPLETED' || acceptedSchema.status === 'INCOMPLETE' || acceptedSchema.status === 'BLOCKED';
       if (done || attempts >= maxAttempts) {
         clearInterval(interval);
         const canBtn = document.getElementById('btn-cancel-live');
@@ -1565,7 +1627,7 @@ async function zoomScreenshot() {
 async function handleCancelLive() {
   if (window.activeCase && window.activeCase.id) {
     try {
-      await fetch(`/api/cases/${window.activeCase.id}/cancel-live`, { method: 'POST' });
+      await window.trustLayerApiFetch(`/api/cases/${window.activeCase.id}/cancel-live`, { method: 'POST' });
       const canBtn = document.getElementById('btn-cancel-live');
       if (canBtn) canBtn.style.display = 'none';
     } catch {}
@@ -1585,7 +1647,7 @@ window.triggerCase = function(target, explicitMode = null) {
 };
 
 // ── Run Investigation Pipeline via Backend API ────────────────────────────
-async function runInvestigation(target, inspectionMode = 'URL_ONLY', consentConfirmed = false, captureDelayMs = 10000) {
+async function runInvestigation(target, inspectionMode = 'URL_ONLY', consentConfirmed = false, captureDelayMs = 10000, interactive = false) {
   if (!target || !target.trim()) return;
   const cleanTarget = target.trim();
 
@@ -1597,7 +1659,7 @@ async function runInvestigation(target, inspectionMode = 'URL_ONLY', consentConf
   if (previousCase?.id && previousCase.schema?.inspectionMode === 'ISOLATED_LIVE' &&
       (previousRuntimeActive || !['COMPLETED', 'INCOMPLETE', 'BLOCKED', 'FAILED'].includes(previousCase.schema.status))) {
     try {
-      await fetch(`/api/cases/${previousCase.id}/cancel-live`, { method: 'POST' });
+      await window.trustLayerApiFetch(`/api/cases/${previousCase.id}/cancel-live`, { method: 'POST' });
     } catch {}
   }
 
@@ -1612,13 +1674,14 @@ async function runInvestigation(target, inspectionMode = 'URL_ONLY', consentConf
   let caseId = null;
   try {
     // POST to create and start the investigation with selected mode
-    const res = await fetch('/api/cases', {
+    const res = await window.trustLayerApiFetch('/api/cases', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         target: cleanTarget,
         inspectionMode: inspectionMode,
         consentConfirmed: ['MODE_B', 'ISOLATED_LIVE'].includes(inspectionMode) && consentConfirmed,
+        ...(inspectionMode === 'ISOLATED_LIVE' ? { interactive: interactive === true } : {}),
         ...(inspectionMode === 'ISOLATED_LIVE' ? { captureDelayMs: [0, 5000, 10000].includes(captureDelayMs) ? captureDelayMs : 10000 } : {}),
         expectedContext: document.getElementById('qr-expected-context')?.value || 'NONE'
       })
@@ -1629,16 +1692,25 @@ async function runInvestigation(target, inspectionMode = 'URL_ONLY', consentConf
     }
     const created = await res.json();
     caseId = created.caseId;
+    evidenceReportRequestKey = null;
+    interactiveLiveEvents = [];
 
     document.getElementById('hdr-case-id').textContent = `CASE #${caseId}`;
     document.getElementById('sb-case-info').textContent = `Case #${caseId} · ${cleanTarget}`;
 
     // Store a minimal activeCase ref for export
     const initialSchema = inspectionMode === 'ISOLATED_LIVE'
-      ? { id: caseId, target: cleanTarget, inspectionMode, status: 'NORMALIZING' }
+      ? { id: caseId, target: cleanTarget, inspectionMode, status: 'NORMALIZING', evidence: [],
+        ...(interactive === true ? { interactiveSession: { enabled: true, status: 'STARTING', events: [] } } : {}) }
       : null;
     window.activeCase = activeCase = { id: caseId, target: cleanTarget, schema: initialSchema };
-    if (initialSchema) updateScreenshotCountdown(initialSchema);
+    if (initialSchema) {
+      updateScreenshotCountdown(initialSchema);
+      // The case-creation response confirms this interactive session was
+      // accepted. Render its truthful STARTING state immediately; the full
+      // authenticated SSE snapshot will replace this partial schema shortly.
+      renderInteractivePanel(initialSchema);
+    }
 
   } catch (err) {
     document.getElementById('hdr-state-pill').className = 'badge CRITICAL';
@@ -1655,32 +1727,34 @@ async function runInvestigation(target, inspectionMode = 'URL_ONLY', consentConf
       const msg = JSON.parse(event.data);
 
       // SSE sends { event, schema } on snapshot, or raw events
-      const schema = msg.schema || null;
+      const schema = interactiveSchemaFromStreamMessage(msg);
       if (schema) {
-        if (window.activeCase) window.activeCase.schema = schema;
-        if (activeCase) activeCase.schema = schema;
-        updateCaseUI(schema);
+        const acceptedSchema = acceptCaseSchema(schema);
+        if (!acceptedSchema) return;
 
-        const done = schema.status === 'COMPLETED' || schema.status === 'INCOMPLETE' || schema.status === 'BLOCKED';
+        const done = shouldCloseCaseEventStream(acceptedSchema);
         if (done) {
-          document.getElementById('hdr-state-pill').className = `badge ${schema.status === 'COMPLETED' ? 'OBSERVED' : 'UNKNOWN'}`;
-          document.getElementById('hdr-state-pill').textContent = describeInspectionStatus(schema).badgeText;
-          document.getElementById('hdr-state-pill').title = describeInspectionStatus(schema).reason || '';
+          document.getElementById('hdr-state-pill').className = `badge ${acceptedSchema.status === 'COMPLETED' ? 'OBSERVED' : 'UNKNOWN'}`;
+          document.getElementById('hdr-state-pill').textContent = describeInspectionStatus(acceptedSchema).badgeText;
+          document.getElementById('hdr-state-pill').title = describeInspectionStatus(acceptedSchema).reason || '';
           evtSource.close();
         }
+      } else if (msg.event === 'evidence_event' && msg.data?.investigationId === caseId) {
+        interactiveLiveEvents.push(msg.data);
+        if (interactiveLiveEvents.length > 64) interactiveLiveEvents = interactiveLiveEvents.slice(-64);
+        if (window.activeCase?.id === caseId) renderInteractivePanel(window.activeCase.schema || {});
       } else if (msg.event === 'complete' || msg.event === 'stage') {
         // Fetch latest schema on any stage/complete event
-        const _fetchLatestSchema = () => fetch(`/api/cases/${caseId}`)
+      const _fetchLatestSchema = () => window.trustLayerApiFetch(`/api/cases/${caseId}`)
           .then(r => r.json())
           .then(schema => {
-            if (window.activeCase) window.activeCase.schema = schema;
-            if (activeCase) activeCase.schema = schema;
-            updateCaseUI(schema);
-            const done = schema.status === 'COMPLETED' || schema.status === 'INCOMPLETE' || schema.status === 'BLOCKED';
+            const acceptedSchema = acceptCaseSchema(schema);
+            if (!acceptedSchema) return;
+            const done = shouldCloseCaseEventStream(acceptedSchema);
             if (done) {
-              document.getElementById('hdr-state-pill').className = `badge ${schema.status === 'COMPLETED' ? 'OBSERVED' : 'UNKNOWN'}`;
-              document.getElementById('hdr-state-pill').textContent = describeInspectionStatus(schema).badgeText;
-              document.getElementById('hdr-state-pill').title = describeInspectionStatus(schema).reason || '';
+              document.getElementById('hdr-state-pill').className = `badge ${acceptedSchema.status === 'COMPLETED' ? 'OBSERVED' : 'UNKNOWN'}`;
+              document.getElementById('hdr-state-pill').textContent = describeInspectionStatus(acceptedSchema).badgeText;
+              document.getElementById('hdr-state-pill').title = describeInspectionStatus(acceptedSchema).reason || '';
               evtSource.close();
             }
           })
@@ -1696,16 +1770,18 @@ async function runInvestigation(target, inspectionMode = 'URL_ONLY', consentConf
 
   evtSource.onerror = () => {
     // SSE closed — fetch final schema (with delay to allow screenshot write to complete)
+    if (window.activeCase?.id === caseId && window.activeCase.schema?.interactiveSession?.status === 'RUNNING') {
+      document.getElementById('interactive-failure').textContent = 'Browser event stream disconnected while the session is active; live observations may be incomplete.';
+    }
     if (caseId) {
-      const _finalFetch = () => fetch(`/api/cases/${caseId}`)
+      const _finalFetch = () => window.trustLayerApiFetch(`/api/cases/${caseId}`)
         .then(r => r.json())
         .then(schema => {
-          if (window.activeCase) window.activeCase.schema = schema;
-          if (activeCase) activeCase.schema = schema;
-          updateCaseUI(schema);
-          document.getElementById('hdr-state-pill').className = `badge ${schema.status === 'COMPLETED' ? 'OBSERVED' : 'UNKNOWN'}`;
-          document.getElementById('hdr-state-pill').textContent = describeInspectionStatus(schema).badgeText || 'DONE';
-          document.getElementById('hdr-state-pill').title = describeInspectionStatus(schema).reason || '';
+          const acceptedSchema = acceptCaseSchema(schema);
+          if (!acceptedSchema) return;
+          document.getElementById('hdr-state-pill').className = `badge ${acceptedSchema.status === 'COMPLETED' ? 'OBSERVED' : 'UNKNOWN'}`;
+          document.getElementById('hdr-state-pill').textContent = describeInspectionStatus(acceptedSchema).badgeText || 'DONE';
+          document.getElementById('hdr-state-pill').title = describeInspectionStatus(acceptedSchema).reason || '';
         })
         .catch(() => {});
       _finalFetch();
@@ -1718,8 +1794,148 @@ async function runInvestigation(target, inspectionMode = 'URL_ONLY', consentConf
 
 // ── Update Workspace UI ───────────────────────────────────────────────────
 
+let evidenceReportRequestKey = null;
+let interactiveLiveEvents = [];
+
+function shouldCloseCaseEventStream(schema) {
+  const caseComplete = ['COMPLETED', 'INCOMPLETE', 'FAILED', 'BLOCKED'].includes(schema?.status);
+  const browserStillActive = ['STARTING', 'RUNNING'].includes(schema?.interactiveSession?.status);
+  return caseComplete && !browserStillActive;
+}
+
+function interactiveSessionPhase(status) {
+  if (status === 'STARTING') return 0;
+  if (status === 'RUNNING') return 1;
+  if (['ENDED', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(status)) return 2;
+  return -1;
+}
+
+function mergeInteractiveCaseSchema(current, incoming) {
+  if (!incoming || current?.id !== incoming.id) return incoming;
+  const previousSession = current.interactiveSession;
+  const nextSession = incoming.interactiveSession;
+  if (!previousSession?.enabled) return incoming;
+
+  const previousPhase = interactiveSessionPhase(previousSession.status);
+  const nextPhase = interactiveSessionPhase(nextSession?.status);
+  const preservePrevious = !nextSession?.enabled || previousPhase > nextPhase;
+  const selectedSession = preservePrevious
+    ? { ...nextSession, ...previousSession }
+    : { ...previousSession, ...nextSession };
+  const eventMap = new Map();
+  for (const item of [...(previousSession.events || []), ...(nextSession?.events || [])]) {
+    const key = item.eventId || `${item.sequence}:${item.type}`;
+    eventMap.set(key, item);
+  }
+  selectedSession.events = [...eventMap.values()]
+    .sort((a, b) => (a.sequence || 0) - (b.sequence || 0)).slice(-512);
+  return { ...incoming, interactiveSession: selectedSession };
+}
+
+function interactiveSchemaFromStreamMessage(message) {
+  if (message?.schema) return message.schema;
+  if (message?.event === 'complete' && message.data?.interactiveSession?.enabled) return message.data;
+  if (message?.event === 'stage' &&
+      ['INTERACTIVE_SESSION_READY', 'INTERACTIVE_SESSION_ENDED', 'INTERACTIVE_SESSION_START_FAILED'].includes(message.data?.stage) &&
+      message.data.schema?.interactiveSession?.enabled) return message.data.schema;
+  return null;
+}
+
+function acceptCaseSchema(schema) {
+  if (!schema || (window.activeCase?.id && window.activeCase.id !== schema.id)) return null;
+  const current = window.activeCase?.id === schema.id ? window.activeCase.schema : null;
+  const accepted = mergeInteractiveCaseSchema(current, schema);
+  const target = accepted.target || window.activeCase?.target || '';
+  window.activeCase = activeCase = { ...(window.activeCase?.id === accepted.id ? window.activeCase : {}),
+    id: accepted.id, target, schema: accepted };
+  updateCaseUI(accepted);
+  return accepted;
+}
+
+async function loadEvidenceReport(schema) {
+  const terminal = ['COMPLETED', 'INCOMPLETE', 'FAILED', 'BLOCKED'].includes(schema.status);
+  const statusEl = document.getElementById('ov-report-status');
+  if (!terminal) { if (statusEl) statusEl.textContent = 'Investigation is running; the report is not final yet.'; return; }
+  const key = `${schema.id}:${schema.completedAt || schema.updatedAt || ''}`;
+  if (evidenceReportRequestKey === key) return;
+  evidenceReportRequestKey = key;
+  try {
+    const response = await window.trustLayerApiFetch(`/api/cases/${schema.id}/evidence-report`);
+    if (!response.ok) throw new Error(`Report unavailable (HTTP ${response.status}).`);
+    const report = await response.json();
+    if (window.activeCase?.id !== report.investigationId) return;
+    document.getElementById('ov-report-scope').textContent = report.verdict.scope;
+    statusEl.textContent = `${report.verdict.headline} · ${report.verdict.value} · ${report.verdict.riskLevel} · ${report.verdict.verifiedThreat ? 'observed threat evidence' : report.verdict.basis}`;
+    const reasons = document.getElementById('ov-report-reasons');
+    reasons.replaceChildren();
+    for (const item of report.reasons) {
+      const row = document.createElement('div');
+      row.textContent = `${item.kind}: ${item.text}${item.evidenceRefs.length ? ` [${item.evidenceRefs.join(', ')}]` : ''}`;
+      reasons.appendChild(row);
+    }
+    document.getElementById('ov-report-conflicts').textContent = report.conflicts.length
+      ? `Conflicting signals: ${report.conflicts.join(' ')}` : '';
+    document.getElementById('ov-report-limitations').textContent = report.inspection.limitations.join(' ');
+    document.getElementById('ov-report-next').textContent = `Next: ${report.recommendation}`;
+  } catch (error) { evidenceReportRequestKey = null; statusEl.textContent = error.message; }
+}
+
+function renderInteractivePanel(schema) {
+  const card = document.getElementById('ov-interactive-browser-card');
+  const session = schema.interactiveSession;
+  if (!card) return;
+  card.style.display = session?.enabled ? 'block' : 'none';
+  if (!session?.enabled) return;
+  document.getElementById('interactive-status').textContent = session.status || 'UNKNOWN';
+  const running = session.status === 'RUNNING';
+  for (const id of ['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-screenshot', 'interactive-cancel']) document.getElementById(id).disabled = !running;
+  const events = [...(session.events || []), ...interactiveLiveEvents.filter(event => event.investigationId === schema.id)].slice(-12);
+  document.getElementById('interactive-events').textContent = events.map(event => `${new Date(event.timestamp || Date.now()).toLocaleTimeString()} · ${event.type}: ${event.observation || event.finding || ''}`).join('\n') || 'No browser events received yet.';
+  const latestArtifact = [...(schema.evidence || [])].reverse().find(item => item.category === 'screenshot' && /^[a-f0-9]{32}$/.test(item.data?.artifactId || ''));
+  if (latestArtifact) {
+    const image = document.getElementById('interactive-screenshot-preview');
+    image.src = `/api/cases/${schema.id}/interactive-artifacts/${latestArtifact.data.artifactId}`;
+    image.style.display = 'block';
+  }
+}
+
+async function submitInteractiveAction(action) {
+  const schema = window.activeCase?.schema;
+  const failure = document.getElementById('interactive-failure');
+  if (!schema?.interactiveSession?.enabled) { failure.textContent = 'This case was not created with interactive browser controls.'; return; }
+  failure.textContent = 'Submitting bounded action…';
+  try {
+    const response = await window.trustLayerApiFetch(`/api/cases/${schema.id}/interactions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `Action failed (HTTP ${response.status}).`);
+    failure.textContent = `${result.action} completed.`;
+    if (result.artifactId) {
+      const image = document.getElementById('interactive-screenshot-preview');
+      image.src = `/api/cases/${schema.id}/interactive-artifacts/${result.artifactId}`;
+      image.style.display = 'block';
+    }
+    const latest = await window.trustLayerApiFetch(`/api/cases/${schema.id}`).then(response => response.json());
+    if (window.activeCase?.id === latest.id) acceptCaseSchema(latest);
+  } catch (error) { failure.textContent = `Action unavailable: ${error.message}`; }
+}
+
+document.getElementById('interactive-navigate')?.addEventListener('click', () => submitInteractiveAction({ type: 'navigate', url: document.getElementById('interactive-navigation-url').value }));
+document.getElementById('interactive-click')?.addEventListener('click', () => submitInteractiveAction({ type: 'click', selector: document.getElementById('interactive-selector').value }));
+document.getElementById('interactive-type')?.addEventListener('click', () => submitInteractiveAction({ type: 'type', selector: document.getElementById('interactive-type-selector').value, text: document.getElementById('interactive-type-text').value }));
+document.getElementById('interactive-screenshot')?.addEventListener('click', () => submitInteractiveAction({ type: 'screenshot' }));
+document.getElementById('interactive-cancel')?.addEventListener('click', async () => {
+  if (!window.activeCase?.id) return;
+  try {
+    const response = await window.trustLayerApiFetch(`/api/cases/${window.activeCase.id}/cancel-live`, { method: 'POST' });
+    if (!response.ok) throw new Error(`Stop failed (HTTP ${response.status}).`);
+    document.getElementById('interactive-failure').textContent = 'Browser stop requested.';
+  } catch (error) { document.getElementById('interactive-failure').textContent = error.message; }
+});
+
 function updateCaseUI(schema) {
   if (!schema) return;
+  renderInteractivePanel(schema);
+  loadEvidenceReport(schema);
 
   // Header & Status bar
   document.getElementById('hdr-case-id').textContent = `CASE #${schema.id}`;
@@ -2123,7 +2339,14 @@ function updateCaseUI(schema) {
       const screenshotUrl = schema.liveInspection?.screenshotCaptured
         ? (schema.screenshotArtifactUrl || `/api/cases/${schema.id}/screenshot`)
         : (schema.initialScreenshotUrl || schema.screenshotArtifactUrl || `/api/cases/${schema.id}/screenshot`);
-      shotImg.src = `${screenshotUrl}${screenshotUrl.includes('?') ? '&' : '?'}t=${Date.now()}`;
+      const screenshotRevision = schema.liveInspection?.screenshotCaptured
+        ? (schema.screenshotArtifactEvidenceId || schema.liveInspection?.pageExtraction?.screenshotEvidenceId || 'final')
+        : (schema.initialScreenshotEvidenceId || 'initial');
+      const screenshotRequestUrl = `${screenshotUrl}${screenshotUrl.includes('?') ? '&' : '?'}v=${encodeURIComponent(screenshotRevision)}`;
+      if (shotImg.dataset.trustLayerArtifactUrl !== screenshotRequestUrl) {
+        shotImg.dataset.trustLayerArtifactUrl = screenshotRequestUrl;
+        shotImg.src = screenshotRequestUrl;
+      }
     }
     if (shotDl) {
       shotDl.href = schema.liveInspection?.screenshotCaptured

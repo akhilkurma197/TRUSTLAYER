@@ -13,12 +13,14 @@ describe('Investigation Engine Core Tests', () => {
 
   it('generates well-formatted case IDs', () => {
     const caseId = InvestigationEngine.generateCaseId();
-    assert.match(caseId, /^TL-\d{4}-\d{4}-\d{4}-[A-Z0-9]{3}$/);
+    assert.match(caseId, /^TL-\d{4}-\d{4}-\d{4}-[A-Z0-9]{12}$/);
+    assert.notEqual(caseId, InvestigationEngine.generateCaseId());
   });
 
   it('creates an investigation case with correct initial state', () => {
     const icase = InvestigationEngine.createCase('https://example.com');
     assert.equal(icase.status, CASE_STATE.CREATED);
+    assert.equal(icase.schema.lifecycleState, 'created');
     assert.equal(icase.evidence.length, 0);
   });
 
@@ -27,6 +29,7 @@ describe('Investigation Engine Core Tests', () => {
     await InvestigationEngine.investigate(icase);
 
     assert.equal(icase.status, CASE_STATE.BLOCKED);
+    assert.equal(icase.schema.lifecycleState, 'failed');
     assert.ok(icase.evidence.some(e => e.title.includes('SSRF')));
   });
 

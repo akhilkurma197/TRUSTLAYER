@@ -10,7 +10,6 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { SSRFGuard } from './ssrf_guard.js';
 import { globalJobController, JOB_STATUS } from './live_job_controller.js';
 import { PageStructureExtractor } from './page_extractor.js';
 
@@ -23,6 +22,10 @@ const BUDGETS = {
 };
 
 export class LiveInspector {
+  static startInteractiveSession(caseId) {
+    return globalJobController.startInteractiveSession(caseId);
+  }
+
   /**
    * Perform an isolated live inspection of the given URL.
    * @param {string} url
@@ -75,7 +78,7 @@ export class LiveInspector {
     }
 
     // ── Step 1: Pre-connection SSRF Check ──
-    const ssrfResult = await SSRFGuard.validateAndResolve(url, options);
+    const ssrfResult = await globalJobController.validateDestination(url, options);
     if (!ssrfResult.allowed) {
       return {
         status: 'BLOCKED',
@@ -159,7 +162,9 @@ export class LiveInspector {
       : (jobRecord.status === JOB_STATUS.PARTIAL ? 'PARTIAL'
       : (jobRecord.status === JOB_STATUS.CANCELLED ? 'CANCELLED'
       : (jobRecord.status === JOB_STATUS.TIMED_OUT ? 'TIMEOUT'
-      : (jobRecord.status === JOB_STATUS.BLOCKED ? 'BLOCKED' : 'FAILED'))));
+      : (jobRecord.status === JOB_STATUS.BLOCKED ? 'BLOCKED'
+      : (jobRecord.status === JOB_STATUS.HTTP_ERROR ? 'HTTP_ERROR'
+      : (jobRecord.status === JOB_STATUS.BUSY ? 'BUSY' : 'FAILED'))))));
 
     if (workerResult.warnings) warnings.push(...workerResult.warnings);
     if (workerResult.errors) errors.push(...workerResult.errors);

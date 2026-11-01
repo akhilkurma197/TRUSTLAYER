@@ -22,12 +22,34 @@ import { LiveJobController, JOB_STATUS } from '../core/investigators/live_job_co
 import { ControlledEgressProxy } from '../core/investigators/egress_proxy.js';
 import { SSRFGuard } from '../core/investigators/ssrf_guard.js';
 import { InvestigationEngine, INSPECTION_MODE } from '../core/investigation_engine.js';
+import { classifyWorkerResultStatus } from '../core/investigators/worker_result_status.js';
+import { evaluateChromiumSandboxEvidence, verifyChromiumSandbox } from '../worker/chromium_sandbox_verifier.js';
+import { hasVerifiedChromiumSandbox } from '../core/investigators/chromium_sandbox_status.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 
 describe('Mode C Security Gate — Container Prerequisite & Insecure Fallback Prohibition', () => {
+
+  it('reserves capacity during asynchronous destination validation and reports BUSY at the limit', async () => {
+    const controller = new LiveJobController({ maxConcurrent: 1 });
+    let finishValidation;
+    const original = SSRFGuard.validateAndResolve;
+    SSRFGuard.validateAndResolve = () => new Promise(resolve => { finishValidation = resolve; });
+    try {
+      const pending = controller.submitJob('https://example.test/', 'case-capacity');
+      const busy = await controller.submitJob('https://other.example/', 'case-busy');
+      assert.equal(busy.status, JOB_STATUS.BUSY);
+      assert.equal(controller.admittedJobs.size, 1);
+      finishValidation({ allowed: false, blockedReason: 'test' });
+      const refused = await pending;
+      assert.equal(refused.status, JOB_STATUS.BLOCKED);
+      assert.equal(controller.admittedJobs.size, 0);
+    } finally {
+      SSRFGuard.validateAndResolve = original;
+    }
+  });
 
   it('strictly refuses live inspection when container runtime is unavailable (zero host subprocess fallback)', async () => {
     // Inject a refused runtime check without depending on the workstation's Docker state.
@@ -72,6 +94,122 @@ describe('Mode C Security Gate — Container Prerequisite & Insecure Fallback Pr
     );
   });
 
+  it('reports 401 and 403 worker responses as blocked inspections', () => {
+    const workerCode = fs.readFileSync(path.join(rootDir, 'worker', 'browser_worker.js'), 'utf8');
+    const controllerCode = fs.readFileSync(path.join(rootDir, 'core', 'investigators', 'live_job_controller.js'), 'utf8');
+    assert.match(workerCode, /classifyWorkerResultStatus\(httpStatus, renderedData\.domNodes\)/);
+    assert.equal(classifyWorkerResultStatus(401, 12), 'BLOCKED');
+    assert.equal(classifyWorkerResultStatus(403, 12), 'BLOCKED');
+    assert.equal(classifyWorkerResultStatus(200, 12), 'SUCCESS');
+    assert.equal(classifyWorkerResultStatus(503, 12), 'HTTP_ERROR');
+    assert.match(workerCode, /HTTP_SERVER_ERROR/);
+    assert.match(controllerCode, /readyStatus === 'BLOCKED' \? JOB_STATUS\.BLOCKED/);
+    assert.match(controllerCode, /readyStatus === 'HTTP_ERROR' \? JOB_STATUS\.HTTP_ERROR/);
+  });
+
+  it('accepts only a renderer with namespace isolation and an additional Chromium seccomp filter', () => {
+    const observedAtMs = Date.now();
+    const browserProcess = { pid: 10, commandLine: '/chrome --remote-debugging-pipe',
+      fields: { PPid: '1' }, namespaces: { user: 'user:[1]', pid: 'pid:[1]' }, observedAtMs };
+    const zygote = { pid: 20, commandLine: '/chrome --type=zygote', fields: { PPid: '10' }, observedAtMs };
+    const renderer = { pid: 30, commandLine: '/chrome --type=renderer',
+      fields: { PPid: '20', Seccomp: '2', Seccomp_filters: '2', NoNewPrivs: '1' },
+      namespaces: { user: 'user:[2]', pid: 'pid:[2]' }, observedAtMs };
+    const baseline = { pid: 99, commandLine: '/usr/bin/node worker',
+      fields: { Seccomp: '2', NoNewPrivs: '1', Seccomp_filters: '1' },
+      namespaces: { user: 'user:[1]', pid: 'pid:[1]' }, observedAtMs };
+    const verified = evaluateChromiumSandboxEvidence({
+      baseline, browserProcess, processes: [baseline, browserProcess, zygote, renderer]
+    });
+    assert.equal(verified.status, 'VERIFIED');
+    assert.equal(verified.rendererChecks[0].verified, true);
+    assert.equal(hasVerifiedChromiumSandbox({ isolationReport: {
+      chromiumSandboxEnabled: true, chromiumSandboxVerification: verified
+    } }), true);
+
+    const outerSeccompOnly = evaluateChromiumSandboxEvidence({
+      baseline, browserProcess,
+      processes: [baseline, browserProcess, zygote, { ...renderer, fields: { ...renderer.fields, Seccomp_filters: '1' } }]
+    });
+    assert.equal(outerSeccompOnly.status, 'UNVERIFIED');
+    assert.equal(hasVerifiedChromiumSandbox({ isolationReport: { chromiumSandboxEnabled: true } }), false);
+
+    const unsandboxedZygote = evaluateChromiumSandboxEvidence({
+      baseline, browserProcess,
+      processes: [baseline, browserProcess, { ...zygote, commandLine: `${zygote.commandLine} --no-zygote-sandbox` }, renderer]
+    });
+    assert.equal(unsandboxedZygote.status, 'UNVERIFIED');
+
+    const staleSnapshot = evaluateChromiumSandboxEvidence({
+      baseline: { ...baseline, observedAtMs: observedAtMs - 11_000 }, browserProcess,
+      processes: [baseline, browserProcess, zygote, renderer]
+    });
+    assert.equal(staleSnapshot.status, 'UNVERIFIED');
+    assert.ok(staleSnapshot.failures.includes('WORKER_BASELINE_EVIDENCE_INVALID_OR_STALE'));
+
+    const malformedSnapshot = evaluateChromiumSandboxEvidence({
+      baseline, browserProcess,
+      processes: [baseline, browserProcess, zygote, { ...renderer,
+        fields: { ...renderer.fields, Seccomp_filters: '2junk' },
+        namespaces: { user: 'not-a-namespace', pid: 'pid:[2]' } }]
+    });
+    assert.equal(malformedSnapshot.status, 'UNVERIFIED');
+
+    const incompleteSnapshot = evaluateChromiumSandboxEvidence({
+      baseline, browserProcess, processes: [baseline, browserProcess, zygote, { ...renderer, fields: { PPid: '20' } }]
+    });
+    assert.equal(incompleteSnapshot.status, 'UNVERIFIED');
+  });
+
+  it('fails sandbox verification closed when browser launch diagnostics or renderer evidence are unavailable', async () => {
+    const pageFailure = await verifyChromiumSandbox({ version: () => 'test' }, {
+      setContent: async () => { throw new Error('renderer crashed'); }
+    });
+    assert.equal(pageFailure.status, 'UNAVAILABLE');
+    assert.equal(pageFailure.browserSandboxEnabled, false);
+    assert.equal(hasVerifiedChromiumSandbox({ isolationReport: {
+      chromiumSandboxEnabled: true, chromiumSandboxVerification: pageFailure
+    } }), false);
+
+    const missingRenderer = evaluateChromiumSandboxEvidence({
+      baseline: { fields: { Seccomp_filters: '1' } },
+      browserProcess: { pid: 1, commandLine: '/chrome --remote-debugging-pipe', namespaces: { user: 'u1', pid: 'p1' } },
+      processes: []
+    });
+    assert.equal(missingRenderer.status, 'UNVERIFIED');
+    assert.ok(missingRenderer.failures.includes('RENDERER_PROCESS_NOT_FOUND'));
+    assert.ok(missingRenderer.failures.includes('RENDERER_NAMESPACE_OR_SECCOMP_LAYER_NOT_VERIFIED'));
+  });
+
+  it('requires the live worker to verify sandbox state before target navigation', () => {
+    const workerCode = fs.readFileSync(path.join(rootDir, 'worker', 'browser_worker.js'), 'utf8');
+    assert.ok(workerCode.indexOf('sandboxVerification = await verifyChromiumSandbox') < workerCode.indexOf('page.goto(targetUrl'));
+    assert.match(workerCode, /Required Chromium renderer sandbox verification failed/);
+    assert.match(workerCode, /chromiumSandboxEnabled: sandboxVerification\?\.status === 'VERIFIED'/);
+  });
+
+  it('fails closed on browser launch failure and cleans up timeout, cancellation, and child failure paths', () => {
+    const workerCode = fs.readFileSync(path.join(rootDir, 'worker', 'browser_worker.js'), 'utf8');
+    const controllerCode = fs.readFileSync(path.join(rootDir, 'core', 'investigators', 'live_job_controller.js'), 'utf8');
+    assert.match(workerCode, /chromium\.launch\(launchOptions\)/);
+    assert.match(workerCode, /catch \(fatal\)[\s\S]*?chromiumSandboxEnabled: false[\s\S]*?status: 'UNAVAILABLE'/);
+    assert.match(controllerCode, /setTimeout\([\s\S]*?this\._cleanup\(job\.jobId\)/);
+    assert.match(controllerCode, /cancel: async \(\) =>[\s\S]*?this\._cleanup\(job\.jobId\)/);
+    assert.match(controllerCode, /child\.on\('error'[\s\S]*?this\._cleanup\(job\.jobId\)/);
+    assert.match(controllerCode, /child\.on\('close'[\s\S]*?this\._cleanup\(job\.jobId\)/);
+  });
+
+  it('bounds extracted DOM collections and does not serialize a duplicate full-page HTML string', () => {
+    const workerCode = fs.readFileSync(path.join(rootDir, 'worker', 'browser_worker.js'), 'utf8');
+    assert.match(workerCode, /headings\.length >= 100/);
+    assert.match(workerCode, /buttons\.length >= 200/);
+    assert.match(workerCode, /forms\.length >= 100/);
+    assert.match(workerCode, /scripts\.length >= 200/);
+    assert.match(workerCode, /links\.length >= 500/);
+    assert.match(workerCode, /htmlBytesIsEstimate: true/);
+    assert.doesNotMatch(workerCode, /document\.documentElement\.outerHTML/);
+  });
+
   it('verifies that worker Dockerfile runs as non-root pwuser with unprivileged sandboxing support', () => {
     const dockerfilePath = path.join(rootDir, 'worker', 'Dockerfile');
     const dockerfileCode = fs.readFileSync(dockerfilePath, 'utf8');
@@ -100,10 +238,92 @@ describe('Mode C Security Gate — Container Prerequisite & Insecure Fallback Pr
     assert.match(controllerCode, /`--network-alias=\$\{proxyAlias\}`/);
     assert.match(controllerCode, /`--proxy=http:\/\/\$\{proxyAlias\}:3128`/);
     assert.match(controllerCode, /const browserContainerName = `trustlayer-browser-\$\{job\.jobId\}`/);
-    assert.match(controllerCode, /docker', \['rm', '-f', handle\.browserContainerName\]/);
+    assert.match(controllerCode, /\['remove_browser_container', handle\.browserContainerName\]/);
+    assert.match(controllerCode, /this\.removeContainer\(name\)/);
     assert.match(controllerCode, /job\.options\?\.onInitialScreenshot/);
-    assert.match(controllerCode, /setInterval\(publishInitialScreenshot, 100\)/);
+    assert.match(controllerCode, /setInterval\(\(\) => \{\s*void syncBrowserOutput\(\)\.then\(publishInitialScreenshot\)\.catch\(\(\) => \{\}\);\s*\}, 250\)/);
+    assert.match(controllerCode, /await this\._ensureDockerRuntime\(\)/);
+    assert.match(controllerCode, /await runDocker\(\[/);
+    assert.doesNotMatch(controllerCode, /execSync|execFileSync/);
     assert.match(fs.readFileSync(path.join(rootDir, 'core', 'investigation_engine.js'), 'utf8'), /onInitialScreenshot: \(/);
+  });
+
+  it('performs idempotent cleanup of containers, child process and per-job temporary files', async () => {
+    const removedContainers = [];
+    const controller = new LiveJobController({
+      removeContainer: name => removedContainers.push(name),
+      terminateChild: async child => { child.kill('SIGTERM'); return true; }
+    });
+    const tempDir = fs.mkdtempSync(path.join(rootDir, 'tmp-phase2-cleanup-'));
+    fs.writeFileSync(path.join(tempDir, 'stale-result.json'), '{"jobId":"old"}');
+    const ownerToken = 'owner-cleanup-test';
+    fs.writeFileSync(path.join(tempDir, '.trustlayer-owner'), ownerToken);
+    let killCount = 0;
+    const handle = {
+      browserContainerName: 'browser-cleanup-test',
+      egressContainerName: 'proxy-cleanup-test',
+      tempDir,
+      job: { outputOwnerToken: ownerToken },
+      child: { killed: false, kill: () => { killCount++; } }
+    };
+    controller.activeJobs.set('cleanup-test', handle);
+    controller.admittedJobs.add('cleanup-test');
+    await Promise.all([controller._cleanup('cleanup-test'), controller._cleanup('cleanup-test')]);
+    assert.deepEqual(removedContainers.sort(), ['browser-cleanup-test', 'proxy-cleanup-test']);
+    assert.equal(killCount, 1);
+    assert.equal(fs.existsSync(tempDir), false);
+    assert.equal(controller.activeJobs.has('cleanup-test'), false);
+    assert.equal(controller.admittedJobs.has('cleanup-test'), false);
+    assert.equal(handle.job.cleanupDiagnostics.status, 'CLEANED');
+  });
+
+  it('reports independent cleanup failures without skipping other cleanup operations', async () => {
+    const actions = [];
+    const controller = new LiveJobController({
+      removeContainer: name => { actions.push(name); if (name === 'browser-fail') throw Object.assign(new Error('secret-looking error'), { code: 'EACCES' }); },
+      terminateChild: async () => { actions.push('terminate'); return true; }
+    });
+    const tempDir = fs.mkdtempSync(path.join(rootDir, 'tmp-phase2-cleanup-failure-'));
+    const job = { status: JOB_STATUS.CANCELLED, outputOwnerToken: 'owner-failure' };
+    fs.writeFileSync(path.join(tempDir, '.trustlayer-owner'), job.outputOwnerToken);
+    const handle = { job, browserContainerName: 'browser-fail', egressContainerName: 'proxy-still-removed',
+      tempDir, child: {} };
+    controller.activeJobs.set('cleanup-failure', handle);
+    await controller._cleanup('cleanup-failure');
+    assert.deepEqual(actions, ['browser-fail', 'proxy-still-removed', 'terminate']);
+    assert.equal(job.cleanupDiagnostics.status, 'FAILED');
+    assert.deepEqual(job.cleanupDiagnostics.operations, [{ operation: 'remove_browser_container', code: 'EACCES' }]);
+    assert.equal(job.status, JOB_STATUS.FAILED);
+    assert.doesNotMatch(JSON.stringify(job.cleanupDiagnostics), /secret-looking/);
+    assert.equal(fs.existsSync(tempDir), false);
+  });
+
+  it('records startup cleanup failures while still deleting the owned output directory', async () => {
+    const controller = new LiveJobController({
+      removeContainer: () => { throw Object.assign(new Error('container removal failed'), { code: 'ETIMEDOUT' }); }
+    });
+    const tempDir = fs.mkdtempSync(path.join(rootDir, 'tmp-phase2-startup-failure-'));
+    const job = { outputOwnerToken: 'startup-owner' };
+    fs.writeFileSync(path.join(tempDir, '.trustlayer-owner'), job.outputOwnerToken);
+    const diagnostics = await controller._cleanupFailedStart(job, ['proxy-startup-failure'], tempDir);
+    assert.equal(diagnostics.status, 'FAILED');
+    assert.deepEqual(diagnostics.operations, [{ operation: 'remove_startup_container_1', code: 'ETIMEDOUT' }]);
+    assert.equal(fs.existsSync(tempDir), false);
+  });
+
+  it('includes every file copied into the worker image in the build fingerprint', () => {
+    const controllerCode = fs.readFileSync(path.join(rootDir, 'core', 'investigators', 'live_job_controller.js'), 'utf8');
+    const dockerfileCode = fs.readFileSync(path.join(rootDir, 'worker', 'Dockerfile'), 'utf8');
+    const dockerignoreCode = fs.readFileSync(path.join(rootDir, '.dockerignore'), 'utf8');
+    assert.match(dockerfileCode, /COPY --chown=pwuser:pwuser core\/ \.\/core\//);
+    assert.match(controllerCode, /\.\.\.collectFilesRecursively\('core'\)\.sort\(\)/);
+    assert.match(dockerfileCode, /COPY --chown=pwuser:pwuser worker\/ \.\/worker\//);
+    assert.match(controllerCode, /\.\.\.collectFilesRecursively\('worker'\)\.sort\(\)/);
+    for (const requiredBuildInput of [
+      '!worker/chromium_sandbox_verifier.js', '!worker/chromium_sandbox_probe.js',
+      '!worker/resource_limits.js',
+      '!core/investigators/url_redaction.js', '!core/investigators/worker_result_status.js'
+    ]) assert.ok(dockerignoreCode.includes(requiredBuildInput), `${requiredBuildInput} must be present in the image build context`);
   });
 
   it('does not retain an HTTP-only Mode C browser fallback', () => {

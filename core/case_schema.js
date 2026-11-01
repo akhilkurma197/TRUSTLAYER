@@ -77,6 +77,7 @@ export function createEmptyCaseSchema(caseId, target, targetType = 'URL') {
     
     // Lifecycle & Progress
     status: CASE_STATE.CREATED,
+    lifecycleState: 'created',
     currentStage: CASE_STATE.NORMALIZING,
     createdAt: Date.now(),
     updatedAt: Date.now(),

@@ -115,42 +115,84 @@ export class ScreenshotIntelligenceExtractor {
    * @param {number} timeoutMs 
    * @returns {Promise<{ status: string, text: string, confidence: number, blocks: Array, error?: string }>}
    */
-  static async performOcr(filePath, timeoutMs = 20000) {
+  static async performOcr(filePath, timeoutMs = 20000, dependencies = {}) {
     let worker = null;
+    let timedOut = false;
+    let recognitionStarted = false;
     let timer = null;
+    const safeTimeout = Number.isFinite(timeoutMs) ? Math.max(1, timeoutMs) : 20000;
 
     try {
-      const { createWorker } = await import('tesseract.js');
-
-      const ocrPromise = (async () => {
-        worker = await createWorker('eng');
-        const ret = await worker.recognize(filePath, {}, { blocks: true });
-        const text = ret.data?.text || '';
-        const confidence = typeof ret.data?.confidence === 'number' ? ret.data.confidence : 0;
-        const blocks = (ret.data?.blocks || []).map((b, idx) => ({
-          id: `block_${idx + 1}`,
-          text: (b.text || '').trim(),
-          confidence: b.confidence ?? confidence,
-          bbox: b.bbox || null
-        })).filter(b => b.text.length > 0);
-
-        return {
-          status: 'SUCCESS',
-          text,
-          confidence,
-          blocks,
-          error: null
-        };
-      })();
-
-      const timeoutPromise = new Promise((_, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(`OCR processing timed out after ${timeoutMs}ms`));
-        }, timeoutMs);
+      const readImage = dependencies.readImage || (file => fs.promises.readFile(file));
+      const createWorker = dependencies.createWorker || (async () => {
+        const tesseract = await import('tesseract.js');
+        return tesseract.createWorker('eng');
       });
 
-      const res = await Promise.race([ocrPromise, timeoutPromise]);
-      return res;
+      // Tesseract.js 7 reads string paths asynchronously inside worker.recognize().
+      // If timeout cleanup runs during that read, terminate() nulls its internal
+      // worker before recognize() reaches send(), producing postMessage-on-null.
+      // Read the bounded, validated local artifact first and pass bytes instead.
+      const operation = (async () => {
+        try {
+          const image = await readImage(filePath);
+          if (timedOut) throw new Error(`OCR processing timed out after ${safeTimeout}ms`);
+          worker = await createWorker();
+          if (timedOut) throw new Error(`OCR processing timed out after ${safeTimeout}ms`);
+          recognitionStarted = true;
+          const ret = await worker.recognize(image, {}, { blocks: true });
+          const text = ret.data?.text || '';
+          const confidence = typeof ret.data?.confidence === 'number' ? ret.data.confidence : 0;
+          const blocks = (ret.data?.blocks || []).map((b, idx) => ({
+            id: `block_${idx + 1}`,
+            text: (b.text || '').trim(),
+            confidence: b.confidence ?? confidence,
+            bbox: b.bbox || null
+          })).filter(b => b.text.length > 0);
+
+          return {
+            status: 'SUCCESS',
+            text,
+            confidence,
+            blocks,
+            error: null
+          };
+        } finally {
+          if (worker) {
+            const ownedWorker = worker;
+            worker = null;
+            await ownedWorker.terminate();
+          }
+        }
+      })();
+      // Attach both handlers immediately. A timeout can win while worker creation is
+      // pending; in that case the operation observes timedOut after creation and
+      // performs its own cleanup without starting recognition.
+      const timeout = new Promise(resolve => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          // Recognition dispatch is already queued when this branch is reachable.
+          // Tesseract documents terminate() as the worker cleanup operation.
+          if (worker && recognitionStarted) {
+            const timedOutWorker = worker;
+            worker = null;
+            try {
+              Promise.resolve(timedOutWorker.terminate()).catch(() => {});
+            } catch {
+              // The OCR result remains unavailable; no result is promoted on cleanup failure.
+            }
+          }
+          resolve({ error: new Error(`OCR processing timed out after ${safeTimeout}ms`) });
+        }, safeTimeout);
+      });
+      const settledOperation = operation.then(
+        value => ({ value }),
+        error => ({ error })
+      );
+
+      const outcome = await Promise.race([settledOperation, timeout]);
+      if (outcome.error) throw outcome.error;
+      return outcome.value;
     } catch (err) {
       return {
         status: 'UNAVAILABLE',
@@ -161,11 +203,6 @@ export class ScreenshotIntelligenceExtractor {
       };
     } finally {
       if (timer) clearTimeout(timer);
-      if (worker) {
-        try {
-          await worker.terminate();
-        } catch {}
-      }
     }
   }
 

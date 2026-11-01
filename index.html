@@ -567,6 +567,28 @@
   </div>
 </div>
 
+<script>
+  window.trustLayerApiFetch = async function(url, options = {}) {
+    const response = await fetch(url, options);
+    if (response.status !== 401) return response;
+    if (!window.__trustLayerAuthPromise) {
+      window.__trustLayerAuthPromise = (async () => {
+        const token = window.prompt('Enter the Trust Layer API token configured by the server operator:');
+        if (!token) return false;
+        const login = await fetch('/api/auth/session', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token })
+        });
+        if (!login.ok) window.alert('Trust Layer API authentication failed. Check the token and try again.');
+        return login.ok;
+      })();
+    }
+    const authenticated = await window.__trustLayerAuthPromise;
+    if (!authenticated) { window.__trustLayerAuthPromise = null; return response; }
+    const retry = await fetch(url, options);
+    if (retry.status === 401) { window.__trustLayerAuthPromise = null; window.alert('Trust Layer API session expired.'); }
+    return retry;
+  };
+</script>
 <script src="vendor/jsQR.js"></script>
 <script>
 'use strict';
@@ -1529,8 +1551,7 @@ const Explainability = {
   linkReport(report, isPartial) {
     const rl = (report.riskLevel||'low').toLowerCase();
     const cls = (rl==='critical'||rl==='high') ? 'critical' : rl;
-    const overallBadgeClass = report.overallVerdict === 'PHISHING' ? 'critical'
-      : (report.overallVerdict === 'SAFE' ? 'low' : 'moderate');
+    const overallBadgeClass = report.overallVerdict === 'PHISHING' ? 'critical' : 'moderate';
     const isHigh = cls==='critical'||cls==='high';
 
     const impBox = report.brandImpersonation ? `
@@ -1557,10 +1578,10 @@ const Explainability = {
     return `
       <div class="trust-report ${cls}">
         <div class="report-header">
-          <span class="badge ${overallBadgeClass}" title="Overall investigation verdict">${report.overallVerdict || 'UNDER REVIEW'}</span>
+        <span class="badge ${overallBadgeClass}" title="URL-only result; this does not verify live page safety">${report.overallVerdict || 'UNDER REVIEW'}</span>
           <span class="score">URL Rule Score: ${report.riskPercentage||((report.riskScore||0)*100).toFixed(0)+'%'}</span>
         </div>
-        <h4 class="report-title">${report.overallVerdict === 'PHISHING' ? '⚠️ Phishing & Fraud Threat Detected' : (report.overallVerdict === 'SAFE' ? '✅ Verified Safe Web Link' : 'Under Review — More website evidence is needed')}</h4>
+        <h4 class="report-title">${report.overallVerdict === 'PHISHING' ? 'Phishing indicators detected in URL structure' : (report.overallVerdict === 'URL_ONLY_NO_INDICATORS' ? 'No URL indicators detected — page safety is unverified' : 'Under Review — More evidence is needed')}</h4>
         ${tier2Banner}
         <div id="rule-engine-score-card" style="margin:10px 0;padding:10px 14px;background:rgba(56,189,248,0.07);border:1px solid rgba(56,189,248,0.2);border-radius:8px;display:flex;align-items:center;gap:10px;font-family:'Space Mono',monospace;font-size:11px;flex-wrap:wrap;">
           <span style="color:#94a3b8;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;">🔢 Rule Engine Score:</span>
@@ -1881,7 +1902,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Helper: fetch completed investigation case with rule engine result and final assessment
   async function fetchCaseResult(url) {
     try {
-      const createRes = await fetch('/api/cases', {
+      const createRes = await window.trustLayerApiFetch('/api/cases', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target: url, targetType: 'URL', inspectionMode: 'URL_ONLY' })
@@ -1892,7 +1913,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // Poll for completion (max 28 iterations = 14s)
       for (let i = 0; i < 28; i++) {
         await new Promise(r => setTimeout(r, 500));
-        const r = await fetch(`/api/cases/${caseId}`);
+        const r = await window.trustLayerApiFetch(`/api/cases/${caseId}`);
         const schema = await r.json();
         if (schema.status === 'COMPLETED' || schema.status === 'INCOMPLETE') {
           return schema;
@@ -1942,13 +1963,13 @@ document.addEventListener('DOMContentLoaded', () => {
         desc: rule.description || rule.reason || 'Deterministic URL rule triggered.'
       })),
       brandImpersonation: null,
-      overallVerdict: ruleVerdict,
+      overallVerdict: ruleVerdict === 'SAFE' ? 'URL_ONLY_NO_INDICATORS' : ruleVerdict,
       explanation: rr?.explanation || 'The deterministic URL rule assessment is incomplete; treat this result as under review.',
       recommendation: ruleVerdict === 'PHISHING'
         ? 'URL rules identified phishing indicators. Do not enter credentials or sensitive information.'
         : (ruleVerdict === 'UNDER_REVIEW'
           ? 'URL rules could not establish a decisive verdict. Verify the destination before sharing sensitive information.'
-          : 'URL rules found no decisive phishing indicators. This URL-only result does not verify page content.'),
+          : 'No suspicious URL indicators were detected. This URL-only result is not a safety verification; inspect the page in isolated mode if appropriate.'),
       isPreliminary: true,
       executionNote: caseSchema?.inspectionMode === 'ISOLATED_LIVE'
         ? `Mode C live inspection: ${caseSchema.liveInspection?.screenshotCaptured ? 'screenshot captured' : 'screenshot not captured'}. Page intent: ${caseSchema.pageAnalysis?.intent?.primary || 'not available'}. This does not change the URL rule verdict.`

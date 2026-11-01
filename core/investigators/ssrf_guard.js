@@ -146,14 +146,21 @@ function checkIpBlocked(ip) {
 
   // ── IPv4 Checks ──
   if (/^\d+\.\d+\.\d+\.\d+$/.test(lower)) {
-    if (lower === '0.0.0.0') return { blocked: true, reason: 'Unspecified address (0.0.0.0)' };
+    if (isInCIDR(lower, '0.0.0.0/8')) return { blocked: true, reason: 'Current-network / unspecified range (0.0.0.0/8)' };
     if (isInCIDR(lower, '127.0.0.0/8')) return { blocked: true, reason: 'Loopback address (127.0.0.0/8)' };
     if (isInCIDR(lower, '10.0.0.0/8')) return { blocked: true, reason: 'Private network (10.0.0.0/8)' };
     if (isInCIDR(lower, '172.16.0.0/12')) return { blocked: true, reason: 'Private network (172.16.0.0/12)' };
     if (isInCIDR(lower, '192.168.0.0/16')) return { blocked: true, reason: 'Private network (192.168.0.0/16)' };
     if (isInCIDR(lower, '169.254.0.0/16')) return { blocked: true, reason: 'Link-local / Cloud metadata (169.254.0.0/16)' };
     if (isInCIDR(lower, '100.64.0.0/10')) return { blocked: true, reason: 'Shared address space / CGNAT (100.64.0.0/10)' };
+    if (isInCIDR(lower, '192.0.0.0/24')) return { blocked: true, reason: 'IETF protocol-assignment range (192.0.0.0/24)' };
+    if (isInCIDR(lower, '192.0.2.0/24')) return { blocked: true, reason: 'Documentation range (192.0.2.0/24)' };
+    if (isInCIDR(lower, '192.88.99.0/24')) return { blocked: true, reason: 'Deprecated 6to4 relay range (192.88.99.0/24)' };
+    if (isInCIDR(lower, '198.18.0.0/15')) return { blocked: true, reason: 'Benchmarking range (198.18.0.0/15)' };
+    if (isInCIDR(lower, '198.51.100.0/24')) return { blocked: true, reason: 'Documentation range (198.51.100.0/24)' };
+    if (isInCIDR(lower, '203.0.113.0/24')) return { blocked: true, reason: 'Documentation range (203.0.113.0/24)' };
     if (isInCIDR(lower, '224.0.0.0/4')) return { blocked: true, reason: 'Multicast address (224.0.0.0/4)' };
+    if (isInCIDR(lower, '240.0.0.0/4')) return { blocked: true, reason: 'Reserved address range (240.0.0.0/4)' };
     return { blocked: false, reason: null };
   }
 
@@ -175,6 +182,21 @@ function checkIpBlocked(ip) {
   // Multicast ff00::/8
   if (isIPv6InRange(lower, 'ff00::', 8)) {
     return { blocked: true, reason: 'Multicast IPv6 (ff00::/8)' };
+  }
+  // Permit only global-unicast space, then exclude special-purpose prefixes
+  // that are not generally suitable as public investigation destinations.
+  if (!isIPv6InRange(lower, '2000::', 3)) {
+    return { blocked: true, reason: 'IPv6 address is outside global-unicast space (2000::/3)' };
+  }
+  for (const [prefix, bits, reason] of [
+    ['2001::', 23, 'IETF protocol-assignment range (2001::/23)'],
+    ['2001:2::', 48, 'Benchmarking range (2001:2::/48)'],
+    ['2001:db8::', 32, 'Documentation range (2001:db8::/32)'],
+    ['2002::', 16, '6to4 transition range (2002::/16)'],
+    ['3fff::', 20, 'Documentation range (3fff::/20)'],
+    ['5f00::', 16, 'Segment-routing range (5f00::/16)']
+  ]) {
+    if (isIPv6InRange(lower, prefix, bits)) return { blocked: true, reason };
   }
 
   return { blocked: false, reason: null };

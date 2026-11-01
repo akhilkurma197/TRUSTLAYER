@@ -24,7 +24,8 @@ export {
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { redactOperationalText } from './log_redaction.js';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -42,6 +43,7 @@ import { OverallRiskAggregator } from './rules/risk_aggregator.js';
 import { LiveInspector } from './investigators/live_inspector.js';
 import { IntelligenceSummaryBuilder } from './investigators/intelligence_summary.js';
 import { ScreenshotIntelligenceExtractor } from './investigators/screenshot_intelligence.js';
+import { isInteractiveSession } from './interactive_action.js';
 import { RedirectTracer } from './investigators/redirect_tracer.js';
 
 export const INSPECTION_MODE = {
@@ -50,6 +52,43 @@ export const INSPECTION_MODE = {
   SNAPSHOT: 'SNAPSHOT',
   ISOLATED_LIVE: 'ISOLATED_LIVE'
 };
+
+/**
+ * Publish an interactive readiness transition only after the isolated worker
+ * has acknowledged START_INTERACTIVE. The schema is attached to the stage
+ * event so SSE clients need not race several independent case refreshes.
+ */
+export function publishInteractiveStartState(icase, liveRes, startAcknowledged, now = Date.now()) {
+  const session = icase?.schema?.interactiveSession;
+  if (!session || session.status !== 'STARTING') return false;
+
+  if (liveRes?.runtimeSessionActive !== true) {
+    session.status = liveRes?.status === 'SUCCESS' ? 'ENDED' : 'FAILED';
+    session.endedAt = now;
+    session.collectionStatus = liveRes?.status === 'SUCCESS' ? 'complete' : 'failed';
+    return false;
+  }
+
+  if (!startAcknowledged) {
+    session.status = 'FAILED';
+    session.endedAt = now;
+    session.endedReason = 'SUPERVISOR_START_FAILED';
+    session.collectionStatus = 'failed';
+    if (icase.schema.liveInspection) {
+      icase.schema.liveInspection.runtimeSessionActive = false;
+      icase.schema.liveInspection.runtimeSessionEndedAt = now;
+    }
+    liveRes.runtimeSessionActive = false;
+    liveRes.runtimeSessionEndedAt = now;
+    icase.emit('stage', { stage: 'INTERACTIVE_SESSION_START_FAILED', schema: structuredClone(icase.schema) });
+    return false;
+  }
+
+  session.status = 'RUNNING';
+  session.collectionStatus = 'ready';
+  icase.emit('stage', { stage: 'INTERACTIVE_SESSION_READY', schema: structuredClone(icase.schema) });
+  return true;
+}
 
 async function waitForRenderReadiness(page, maxWaitMs = 5000) {
   const deadline = Date.now() + maxWaitMs;
@@ -165,7 +204,7 @@ export class InvestigationCase {
   }
 
   log(message, level = 'info') {
-    const entry = { ts: Date.now(), message, level };
+    const entry = { ts: Date.now(), message: redactOperationalText(message), level };
     this._opLog.push(entry);
     this.emit('operation', entry);
   }
@@ -209,14 +248,21 @@ export class InvestigationCase {
 
 export class InvestigationEngine {
   static CASE_HISTORY = new Map();
+  static ISSUED_CASE_IDS = new Set();
 
   static generateCaseId() {
     const now = new Date();
     const YYYY = now.getFullYear();
     const MMDD = String(now.getMonth() + 1).padStart(2, '0') + String(now.getDate()).padStart(2, '0');
     const HHmm = String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0');
-    const rand = Math.random().toString(36).substring(2, 5).toUpperCase();
-    return `TL-${YYYY}-${MMDD}-${HHmm}-${rand}`;
+    let suffix;
+    let id;
+    do {
+      suffix = randomBytes(6).toString('hex').toUpperCase();
+      id = `TL-${YYYY}-${MMDD}-${HHmm}-${suffix}`;
+    } while (this.ISSUED_CASE_IDS.has(id));
+    this.ISSUED_CASE_IDS.add(id);
+    return id;
   }
 
   static createCase(target, targetType = 'URL', mode = 'URL_ONLY') {
@@ -230,6 +276,7 @@ export class InvestigationEngine {
    */
   static async investigate(icase) {
     icase.schema.status = CASE_STATE.NORMALIZING;
+    icase.schema.lifecycleState = 'running';
     icase.setStage(CASE_STATE.NORMALIZING);
 
     try {
@@ -383,6 +430,7 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
           icase.schema.assessment.riskLevel = qrAnalysis.isSuspicious ? 'HIGH' : 'LOW';
           icase.schema.assessment.summary = qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join('; ') : `QR code decoded as ${qrAnalysis.type} payload without immediate security anomalies.`;
           icase.schema.completedAt = Date.now();
+          icase.schema.lifecycleState = 'completed';
           InvestigationEngine.CASE_HISTORY.set(icase.id, icase.schema);
           icase.emit('complete', icase.schema);
           return icase;
@@ -392,13 +440,16 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
       // ── Step 1: URL Normalization & Parsing ──
       const parsed = URLParser.parse(targetUrl);
       if (!parsed.isValid) {
-        icase.log(`TARGET REJECTED: ${parsed.error}`, 'error');
-        icase.schema.errors.push(parsed.error);
+        const safeParseError = 'Target could not be parsed as a valid URL.';
+        icase.log(`TARGET REJECTED: ${safeParseError}`, 'error');
+        icase.schema.errors.push(safeParseError);
         icase.schema.coverage.url = STAGE_STATUS.FAILED;
         icase.schema.status = CASE_STATE.FAILED;
+        icase.schema.lifecycleState = 'failed';
+        icase.schema.completedAt = Date.now();
         icase.schema.assessment.verificationState = VERIFICATION_STATE.UNVERIFIED;
         icase.schema.assessment.headline = 'Invalid Target Format';
-        icase.addEvidence(EVIDENCE_PROVENANCE.OBSERVED, 'url', 'Malformed URL Target', parsed.error);
+        icase.addEvidence(EVIDENCE_PROVENANCE.OBSERVED, 'url', 'Malformed URL Target', safeParseError);
         icase.emit('complete', icase.schema);
         return icase;
       }
@@ -426,6 +477,8 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
       if (parsed.isIp && (parsed.hostname.startsWith('10.') || parsed.hostname.startsWith('192.168.') || parsed.hostname.startsWith('127.') || parsed.hostname === 'localhost')) {
         icase.log(`SSRF BLOCK: Private address ${parsed.hostname} prohibited`, 'warn');
         icase.schema.status = CASE_STATE.BLOCKED;
+        icase.schema.lifecycleState = 'failed';
+        icase.schema.completedAt = Date.now();
         icase.schema.coverage.url = STAGE_STATUS.COMPLETED;
         icase.schema.coverage.http = STAGE_STATUS.SKIPPED;
         icase.schema.assessment.verificationState = VERIFICATION_STATE.INVESTIGATION_INCOMPLETE;
@@ -567,7 +620,7 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
 
       if (icase.schema.inspectionMode === 'ISOLATED_LIVE') {
         icase.log('MODE C: Executing Isolated Live Inspection in sandboxed worker...');
-        if (demoConfig) {
+        if (demoConfig && !isInteractiveSession(icase.schema.interactiveSession)) {
           icase.schema.isDemo = true;
           icase.log('DEMO VECTOR [MODE C]: Rendering dynamic controlled fixture via Playwright Chromium...');
           try {
@@ -672,6 +725,44 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
           // Real live target: LiveInspector via container supervisor
           const liveRes = await LiveInspector.inspect(parsed.normalizedUrl, {
             caseId: icase.id,
+            interactive: isInteractiveSession(icase.schema.interactiveSession),
+            keepAliveMs: isInteractiveSession(icase.schema.interactiveSession) ? 120000 : undefined,
+            onInteractiveEvent: (observation) => icase._publishInteractiveObservation?.(observation),
+            onInteractiveEnd: (status, detail = {}) => {
+              if (icase.schema.interactiveSession) {
+                icase.schema.interactiveSession.status = status;
+                icase.schema.interactiveSession.endedAt = Date.now();
+                const reason = ['SESSION_LIMIT_REACHED', 'INPUT_CLOSED', 'SUPERVISOR_TIMEOUT', 'SUPERVISOR_START_FAILED', 'OPERATOR_CANCELLED', 'CLEANUP_FAILED', 'WORKER_EXITED'].includes(detail.reason)
+                  ? detail.reason : 'WORKER_EXITED';
+                icase.schema.interactiveSession.endedReason = reason;
+                if (detail.lifecycle && typeof detail.lifecycle === 'object') {
+                  const evidence = detail.lifecycle;
+                  icase.schema.interactiveSession.workerLifecycle = {
+                    readyEventReceived: evidence.readyEventReceived === true,
+                    workerReadyEventAt: Number.isFinite(evidence.workerReadyEventAt) ? evidence.workerReadyEventAt : null,
+                    readinessEventReceivedAt: Number.isFinite(evidence.readinessEventReceivedAt) ? evidence.readinessEventReceivedAt : null,
+                    sessionStartedAt: Number.isFinite(evidence.sessionStartedAt) ? evidence.sessionStartedAt : null,
+                    workerSessionStartedAt: Number.isFinite(evidence.workerSessionStartedAt) ? evidence.workerSessionStartedAt : null,
+                    workerEndEventAt: Number.isFinite(evidence.workerEndEventAt) ? evidence.workerEndEventAt : null,
+                    endedAt: Number.isFinite(evidence.endedAt) ? evidence.endedAt : null,
+                    endReason: reason,
+                    workerExitCode: Number.isInteger(evidence.workerExitCode) ? evidence.workerExitCode : null,
+                    workerSignalCode: typeof evidence.workerSignalCode === 'string' && /^[A-Z0-9]+$/.test(evidence.workerSignalCode)
+                      ? evidence.workerSignalCode : null,
+                    readyElapsedMs: Number.isFinite(evidence.readyElapsedMs) ? evidence.readyElapsedMs : null,
+                    sessionElapsedMs: Number.isFinite(evidence.sessionElapsedMs) ? evidence.sessionElapsedMs : null,
+                    deadlineElapsedMs: Number.isFinite(evidence.deadlineElapsedMs) ? evidence.deadlineElapsedMs : null
+                  };
+                }
+                if (icase.schema.liveInspection) {
+                  icase.schema.liveInspection.runtimeSessionActive = false;
+                  icase.schema.liveInspection.runtimeSessionEndedAt = icase.schema.interactiveSession.endedAt;
+                }
+                icase._publishInteractiveObservation?.({ type: 'session_ended', observation: `Interactive browser session ended (${reason}).` });
+                icase.emit('stage', { stage: 'INTERACTIVE_SESSION_ENDED', sessionStatus: status,
+                  schema: structuredClone(icase.schema) });
+              }
+            },
             captureDelayMs: icase.schema.captureDelayMs,
             onCaptureStatus: (captureStatus) => {
               icase.schema.screenshotCapture = captureStatus;
@@ -697,6 +788,13 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
             }
           }, icase._abortSignal);
           icase.schema.liveInspection = liveRes;
+          let interactiveStartAcknowledged = true;
+          if (icase.schema.interactiveSession?.status === 'STARTING' && liveRes.runtimeSessionActive === true) {
+            const sessionDeadline = await LiveInspector.startInteractiveSession(icase.id);
+            interactiveStartAcknowledged = Number.isFinite(sessionDeadline);
+            if (interactiveStartAcknowledged) liveRes.runtimeSessionUntil = sessionDeadline;
+          }
+          publishInteractiveStartState(icase, liveRes, interactiveStartAcknowledged);
           const liveHttpCode = Number(liveRes.httpStatus) || null;
           const hasLiveHttpResponse = liveHttpCode !== null;
           const isLiveAccessDenied = liveHttpCode === 403;
@@ -1437,16 +1535,23 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
         isTestFixture: isSecurityTestFixture,
         hasIdentityMismatch,
         hasExfiltration: hasExfilForm,
-        inspectionMode: icase.schema.inspectionMode || 'URL_ONLY'
+        inspectionMode: icase.schema.inspectionMode || 'URL_ONLY',
+        modelPrediction: icase.schema.modelResult.prediction,
+        modelProbability: icase.schema.modelResult.probabilityPhishing
       });
       icase.schema.overallAssessment = overall;
       icase.schema.assessment.verdict = overall.finalVerdict;
       if (overall.finalVerdict === 'KNOWN_SECURITY_TEST_FIXTURE') {
         icase.schema.assessment.verificationState = VERIFICATION_STATE.KNOWN_SECURITY_TEST_FIXTURE;
       } else if (overall.finalVerdict === 'PHISHING') {
-        icase.schema.assessment.verificationState = VERIFICATION_STATE.HIGH_RISK_CONFIRMED;
+        icase.schema.assessment.verificationState = overall.verifiedThreat
+          ? VERIFICATION_STATE.HIGH_RISK_CONFIRMED
+          : VERIFICATION_STATE.HIGH_RISK_SUSPECTED;
       } else if (overall.finalVerdict === 'UNDER_REVIEW') {
         icase.schema.assessment.verificationState = VERIFICATION_STATE.UNVERIFIED;
+      } else if (overall.finalVerdict === 'NO_THREAT_OBSERVED') {
+        icase.schema.assessment.verificationState = VERIFICATION_STATE.UNVERIFIED;
+        icase.schema.assessment.evidenceSufficient = false;
       } else {
         icase.schema.assessment.verificationState = VERIFICATION_STATE.EVIDENCE_SUFFICIENT;
       }
@@ -1512,6 +1617,10 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
 
       icase.schema.coverage.evidence = STAGE_STATUS.COMPLETED;
       icase.schema.status = (hasHttpResponse || isUrlOnlyPreliminary) ? CASE_STATE.COMPLETED : CASE_STATE.INCOMPLETE;
+      if (icase.schema.lifecycleState !== 'cancelled') {
+        icase.schema.lifecycleState = (icase.schema.renderStatus === 'RENDER_TIMEOUT' || icase.schema.liveInspection?.status === 'TIMEOUT') ? 'timed_out'
+          : (icase.schema.status === CASE_STATE.COMPLETED ? 'completed' : 'failed');
+      }
       icase.schema.completedAt = Date.now();
       if (icase.schema.modeCTimings) icase.schema.modeCTimings.total_investigation_ms = icase.schema.completedAt - icase.schema.createdAt;
       if (icase.schema.modeCTimings) icase.log(`MODE C FINAL TIMINGS (ms): ${JSON.stringify(icase.schema.modeCTimings)}`);
@@ -1520,11 +1629,14 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
       icase.emit('complete', icase.schema);
 
     } catch (err) {
-      icase.schema.status = CASE_STATE.FAILED;
-      icase.schema.errors.push(err.message);
+      const wasCancelled = icase.schema.lifecycleState === 'cancelled' || icase._abortSignal?.aborted;
+      icase.schema.status = wasCancelled ? CASE_STATE.INCOMPLETE : CASE_STATE.FAILED;
+      icase.schema.lifecycleState = wasCancelled ? 'cancelled' : 'failed';
+      icase.schema.completedAt = Date.now();
+      icase.schema.errors.push('Investigation could not be completed.');
       if (icase.schema.modeCTimings) icase.schema.modeCTimings.total_investigation_ms = Date.now() - icase.schema.createdAt;
-      icase.log(`INVESTIGATION ERROR: ${err.message}`, 'error');
-      icase.emit('error', { error: err.message });
+      icase.log('INVESTIGATION ERROR: internal processing failure', 'error');
+      icase.emit('error', { error: 'Investigation could not be completed.' });
       icase.emit('complete', icase.schema);
     }
 

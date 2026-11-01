@@ -4,10 +4,19 @@ Trust Layer investigates URLs and QR payloads using URL analysis, redirect traci
 
 ## Start the application
 
+The control API requires a single-operator secret of at least 32 random bytes. Do not commit it, paste it into source files, or include it in logs. In PowerShell, generate an ephemeral secret and start the server in the same shell:
+
 ```powershell
 npm install
+$apiSecretBytes = [byte[]]::new(32)
+[System.Security.Cryptography.RandomNumberGenerator]::Fill($apiSecretBytes)
+$env:TRUSTLAYER_API_TOKEN = [Convert]::ToBase64String($apiSecretBytes)
 npm start
 ```
+
+The browser UI prompts for this token on its first API request. It exchanges the token for an eight-hour, HttpOnly, SameSite=Strict session cookie; the token itself is not stored in browser storage or placed in URLs. Direct API clients can send `Authorization: Bearer <token>`. For TLS-terminating reverse proxies set `NODE_ENV=production` and `TRUSTLAYER_PUBLIC_ORIGIN` to the exact public origin (for example `https://trustlayer.example`). Protect the environment variable using the host's secret-management facilities.
+
+This is a single-operator boundary: every holder of the configured API token shares access to all in-memory cases and their screenshots. It is not a multi-user ownership system. Do not share the token among mutually untrusted users or expose the service to the public internet without a separate identity and authorization layer.
 
 ## Enable Mode C
 
