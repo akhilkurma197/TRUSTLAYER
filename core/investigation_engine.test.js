@@ -33,29 +33,34 @@ describe('Investigation Engine Core Tests', () => {
     assert.ok(icase.evidence.some(e => e.title.includes('SSRF')));
   });
 
-  it('investigates HDFC impersonation vector with full evidence & breakpoints', async () => {
-    const icase = InvestigationEngine.createCase('http://hdfc-netbanking-verify.xyz/login.php?verify=1');
-    await InvestigationEngine.investigate(icase);
+  it('keeps the simulated HDFC URL vector high-risk but unconfirmed in URL-only mode', async () => {
+    const originalResolve = DNSReconInvestigator.resolve;
+    DNSReconInvestigator.resolve = async hostname => ({ status: 'SUCCESS', hostname,
+      ipAddresses: ['203.0.113.7'], dnsRecords: [], nameservers: [], asn: null,
+      tlsMetadata: null, source: 'deterministic test fixture', timestamp: Date.now(), error: null });
+    try {
+      const icase = InvestigationEngine.createCase('http://hdfc-netbanking-verify.xyz/login.php?verify=1');
+      await InvestigationEngine.investigate(icase);
 
-    assert.equal(icase.status, CASE_STATE.COMPLETED);
-    assert.equal(icase.isDemo, true);
-    assert.equal(icase.riskLevel, 'CRITICAL');
-    assert.ok(icase.evidence.length >= 4, `Expected >= 4 evidence items, got ${icase.evidence.length}`);
-    
-    // Check Evidence IDs
-    const e1 = icase.evidence[0];
-    assert.equal(e1.id, 'E-001');
+      assert.equal(icase.status, CASE_STATE.COMPLETED);
+      assert.equal(icase.isDemo, true);
+      assert.equal(icase.riskLevel, 'HIGH');
+      assert.equal(icase.schema.overallAssessment.finalVerdict, 'UNDER_REVIEW');
+      assert.equal(icase.schema.assessment.verificationState, 'UNVERIFIED');
+      assert.equal(icase.schema.pageContentAssessment.fullRenderedInspection, false,
+        'the controlled HTML is simulated evidence, not a live rendered inspection');
+      assert.ok(icase.evidence.length >= 4, `Expected >= 4 evidence items, got ${icase.evidence.length}`);
 
-    // Check Trust Breakpoints
-    assert.ok(icase.trustBreakpoint.length >= 1, 'Should detect trust breakpoints');
-    assert.ok(icase.trustBreakpoint.some(bp => bp.type === 'IDENTITY_DISCONTINUITY' || bp.type === 'EXTERNAL_CREDENTIAL_EXFILTRATION'));
-
-    // Check Attack Story
-    assert.ok(icase.attackStory.length >= 2, 'Attack story should have multi-step breakdown');
-
-    // Check Deception Path
-    assert.ok(icase.deceptionPath.perceived.length > 0);
-    assert.ok(icase.deceptionPath.actual.length > 0);
+      const e1 = icase.evidence[0];
+      assert.equal(e1.id, 'E-001');
+      assert.ok(icase.trustBreakpoint.length >= 1, 'should retain simulated trust breakpoints');
+      assert.ok(icase.trustBreakpoint.some(bp => bp.type === 'IDENTITY_DISCONTINUITY' || bp.type === 'CROSS_DOMAIN_FORM_DESTINATION'));
+      assert.ok(icase.attackStory.length >= 2, 'should retain the multi-step attack story');
+      assert.ok(icase.deceptionPath.perceived.length > 0);
+      assert.ok(icase.deceptionPath.actual.length > 0);
+    } finally {
+      DNSReconInvestigator.resolve = originalResolve;
+    }
   });
 
   it('correctly validates official trusted domains (google.com)', async () => {
@@ -88,6 +93,9 @@ describe('Investigation Engine Core Tests', () => {
       assert.equal(icase.schema.pageAnalysis.screenshotAvailable, false);
       assert.equal(icase.schema.status, CASE_STATE.COMPLETED);
       assert.equal(icase.schema.overallAssessment.finalVerdict, 'UNDER_REVIEW');
+      assert.equal(icase.schema.overallAssessment.outcome, 'UNVERIFIED');
+      assert.equal(icase.schema.urlRiskAssessment.scope, 'URL_STRUCTURE_ONLY');
+      assert.equal(icase.schema.urlRiskAssessment.isPreliminary, true);
     } finally {
       DNSReconInvestigator.resolve = originalDnsResolve;
       globalThis.fetch = originalFetch;

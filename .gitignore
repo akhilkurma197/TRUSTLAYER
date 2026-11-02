@@ -1,0 +1,10 @@
+# Local configuration and operator credentials
+.env
+.env.*
+!.env.example
+*.secret
+secrets/
+
+# Generated local caches and test artifacts
+.DS_Store
+Thumbs.db

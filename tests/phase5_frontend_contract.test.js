@@ -24,6 +24,20 @@ test('interactive browser panel uses existing case-authenticated APIs and bounde
   assert.doesNotMatch(consoleHtml, /remote-debugging-port|--no-sandbox/i);
 });
 
+test('verdict UI distinguishes URL-only indicators from a final evidence outcome', () => {
+  assert.match(homeHtml, /rawBadgeText === 'SAFE' \? 'NO URL INDICATORS'/,
+    'a structurally clean URL is not displayed as a safe destination');
+  assert.match(consoleHtml, /rawClass === 'SAFE' \? 'NO URL INDICATORS'/,
+    'the URL layer is labeled as a preliminary indicator result');
+  assert.match(consoleHtml, /pageAssessment\.fullRenderedInspection \? \(pageAssessment\.outcome \|\| pr\) : 'UNVERIFIED'/,
+    'the page layer remains unverified until rendered inspection completes');
+  assert.match(consoleHtml, /elOverallRisk\.textContent = isFixture \? 'KNOWN TEST FIXTURE' : outcome/,
+    'the final UI consumes the evidence-based outcome');
+  assert.match(consoleHtml, /report\.verdict\.outcome \|\| report\.verdict\.value/,
+    'the report view displays the canonical outcome while preserving legacy clients');
+  assert.match(investigationEngine, /classification: icase\.schema\.ruleEngineResult\?\.classification \|\| 'UNAVAILABLE',[\s\S]*?scope: 'URL_STRUCTURE_ONLY', isPreliminary: true/);
+});
+
 test('interactive opt-in is selected before creation and is never offered as an existing-case conversion', () => {
   const intakeOption = consoleHtml.indexOf('id="intake-mode-c-interactive-option"');
   const consentModal = consoleHtml.indexOf('id="mode-c-consent-modal"');

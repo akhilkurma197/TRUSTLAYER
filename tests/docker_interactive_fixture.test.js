@@ -490,7 +490,10 @@ test('opt-in Playwright UI workflow through the local Mode C fixture, supervisor
   const priorDnsResolve = DNSReconInvestigator.resolve;
   const previousFixturePolicy = globalJobController._testLocalFixturePolicy;
   const previousRuntimeFailureDiagnostics = globalJobController._testRuntimeFailureDiagnostics;
-  const server = createApp({ apiToken: operatorToken, cases }).listen(0, '127.0.0.1');
+  // Exercise the same loopback-only, same-origin browser session used by local
+  // development. Direct fixture API calls below continue to use the test-only
+  // bearer token; browser UI requests authenticate with the HttpOnly session.
+  const server = createApp({ apiToken: operatorToken, localDevelopmentAuth: true, cases }).listen(0, '127.0.0.1');
   let fixtureAddress;
   let fixtureContainerId;
   let base;
@@ -663,11 +666,6 @@ test('opt-in Playwright UI workflow through the local Mode C fixture, supervisor
       recordBrowserLifecycle(`dialog-${type}`);
       const task = (async () => {
         try {
-          if (type === 'prompt' && phase === 'case-creation') {
-            await dialog.accept(operatorToken);
-            recordBrowserLifecycle('expected-auth-prompt-accepted');
-            return;
-          }
           await dialog.dismiss();
           dialogFailures.push({ type, phase, code: 'unexpected-dialog-dismissed' });
         } catch (error) {
@@ -1312,7 +1310,7 @@ test('opt-in Playwright UI workflow through the local Mode C fixture, supervisor
     const stoppedViewport = await fetch(`${base}/api/cases/${first.caseId}/interactive-viewport`, {
       headers: { Authorization: `Bearer ${operatorToken}`, 'X-TrustLayer-Case-Access': first.caseAccessToken }
     });
-    assert.equal(stoppedViewport.status, 409, 'viewport frames and inputs must stop when the case is cancelled');
+    assert.equal(stoppedViewport.status, 204, 'a cancelled session returns no viewport frame without reporting a worker error');
     await firstEvents.close();
     const oldBrowserName = firstHandle.browserContainerName;
     const oldProxyName = firstHandle.egressContainerName;
@@ -1404,19 +1402,23 @@ test('opt-in Playwright UI workflow through the local Mode C fixture, supervisor
     const authSession204Count = appResponses.filter(item => item.method === 'POST' &&
       item.path === '/api/auth/session' && item.status === 204 && item.phase === 'case-creation').length;
     const allApplication401ResponseCount = appResponses.filter(item => item.status === 401).length;
+    const safeUnexpected401Responses = appResponses.filter(item => item.status === 401 &&
+      !(item.method === 'POST' && item.path === '/api/cases' && item.phase === 'case-creation' &&
+        !item.operatorSessionCookiePresent)).map(item => ({ path: item.path, method: item.method,
+      resourceType: item.resourceType, phase: item.phase, operatorSessionCookiePresent: item.operatorSessionCookiePresent }));
     const expectedAuthChallengeErrors = browserConsoleErrors.filter(error => isExpectedCaseCreationAuthChallenge(error, {
       unauthenticatedCaseCreation401Count, authenticatedCaseCreation201Count, authSession204Count,
       allApplication401ResponseCount,
-      authPromptAccepted: browserDialogs.includes('prompt') && browserLifecycle.some(item => item.event === 'expected-auth-prompt-accepted')
+      authSessionEstablished: authSession204Count === 1 && authenticatedCaseCreation201Count === 1
     }));
     const unexpectedConsoleErrors = browserConsoleErrors.filter(error => !expectedAuthChallengeErrors.includes(error));
     assert.ok(expectedAuthChallengeErrors.length <= 1, 'only one browser console error may correspond to the single initial authentication challenge');
     assert.deepEqual(unexpectedConsoleErrors, [],
-      'frontend console errors must not occur except for the verified initial case-creation authentication challenge');
-    assert.deepEqual(browserDialogs, ['prompt'], 'only the expected operator-authentication prompt should appear');
+      `frontend console errors must not occur except for the verified initial case-creation authentication challenge; safe 401 response metadata: ${JSON.stringify(safeUnexpected401Responses)}`);
+    assert.deepEqual(browserDialogs, [], 'loopback local-session authentication must not prompt for an API token');
     assert.equal(appResponses.some(item => item.status >= 500), false, 'frontend API responses must not contain server errors');
     assert.equal(appResponses.some(item => item.status === 401 && !(item.method === 'POST' && new URL(item.url).pathname === '/api/cases')), false,
-      'the only unauthenticated application response should be the expected case-creation challenge');
+      `the only unauthenticated application response should be the expected case-creation challenge; unexpected 401 metadata: ${JSON.stringify(safeUnexpected401Responses)}`);
     for (const pathname of ['/api/auth/session', '/api/cases', `/api/cases/${first.caseId}/events`,
       `/api/cases/${first.caseId}/interactions`, `/api/cases/${first.caseId}/interactive-artifacts/`,
       `/api/cases/${first.caseId}/cancel-live`]) {

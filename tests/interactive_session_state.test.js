@@ -134,3 +134,111 @@ test('live viewport maps displayed letterboxed image coordinates to normalized w
   assert.equal(context.mapViewportPoint({ clientX: 330, clientY: 25 }), null,
     'clicks in the letterbox margin are not sent to the worker');
 });
+
+test('pointer movement coalesces to the latest position and never overlaps worker requests', async () => {
+  const start = html.indexOf('let interactiveViewportTimer = null;');
+  const end = html.indexOf('\nfunction bindInteractiveViewport()', start);
+  assert.ok(start >= 0 && end > start, 'viewport movement scheduler must be present');
+  const timers = [];
+  const requests = [];
+  let now = 10_000;
+  let activeRequests = 0;
+  let maxActiveRequests = 0;
+  let resolveFirst;
+  const context = {
+    Date: { now: () => now },
+    window: { activeCase: { id: 'case-pointer', schema: { interactiveSession: { status: 'RUNNING' } } } },
+    document: { getElementById: () => ({ textContent: '' }) },
+    setTimeout: (callback, delay) => { const timer = { callback, delay, id: timers.length + 1 }; timers.push(timer); return timer.id; },
+    clearTimeout: id => { const timer = timers.find(item => item.id === id); if (timer) timer.cancelled = true; },
+    submitInteractiveAction: action => {
+      requests.push(action);
+      activeRequests++;
+      maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+      if (requests.length === 1) return new Promise(resolve => { resolveFirst = value => { activeRequests--; resolve(value); }; });
+      activeRequests--;
+      return Promise.resolve(true);
+    },
+    interactiveViewportDisconnected: false
+  };
+  vm.createContext(context);
+  vm.runInContext(`${html.slice(start, end)}\nglobalThis.queuePointer = queueInteractivePointerMove;`, context);
+
+  context.queuePointer({ x: 1000, y: 1000 });
+  context.queuePointer({ x: 2000, y: 2000 });
+  const firstTimer = timers.find(item => !item.cancelled);
+  const firstFlush = firstTimer.callback();
+  await Promise.resolve();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].x, 2000, 'intermediate pointer positions are replaced with the newest position');
+
+  context.queuePointer({ x: 3000, y: 3000 });
+  context.queuePointer({ x: 4000, y: 4000 });
+  assert.equal(timers.filter(item => !item.cancelled).length, 1,
+    'only one latest pointer position is retained while a worker request is active');
+  resolveFirst(true);
+  await firstFlush;
+  now += 500;
+  const secondTimer = timers.filter(item => !item.cancelled).at(-1);
+  await secondTimer.callback();
+  assert.deepEqual(requests.map(action => action.x), [2000, 4000]);
+  assert.equal(maxActiveRequests, 1, 'pointer movement requests are serialized');
+});
+
+test('late viewport frames cannot repaint a terminal session and terminal no-content is handled quietly', async () => {
+  const start = html.indexOf('let interactiveViewportTimer = null;');
+  const end = html.indexOf('\nfunction bindInteractiveViewport()', start);
+  assert.ok(start >= 0 && end > start, 'viewport polling lifecycle must be present');
+  const timers = [];
+  let resolveFetch;
+  const image = { style: {}, src: '', onload: null, removeAttribute() {} };
+  const placeholder = { style: {}, textContent: '' };
+  const status = { textContent: '' };
+  const elements = new Map([['interactive-live-viewport', image], ['interactive-viewport-placeholder', placeholder],
+    ['interactive-viewport-status', status]]);
+  const schema = { interactiveSession: { status: 'RUNNING' } };
+  const context = {
+    window: { activeCase: { id: 'case-cancel-race', schema } },
+    document: { getElementById: id => elements.get(id) || { disabled: false } },
+    URL: { createObjectURL: () => 'blob:stale-frame', revokeObjectURL() {} },
+    setTimeout(callback) { const timer = { callback, id: timers.length + 1 }; timers.push(timer); return timer.id; },
+    clearTimeout(id) { const timer = timers.find(item => item.id === id); if (timer) timer.cancelled = true; },
+    fetch() { return new Promise(resolve => { resolveFetch = resolve; }); },
+    trustLayerApiFetch() { return new Promise(resolve => { resolveFetch = resolve; }); },
+    interactiveViewportDisconnected: false
+  };
+  context.window.trustLayerApiFetch = context.trustLayerApiFetch;
+  vm.createContext(context);
+  vm.runInContext(`${html.slice(start, end)}\nglobalThis.pollViewport = scheduleInteractiveViewport; globalThis.stopViewport = stopInteractiveViewport; globalThis.setViewportCaseId = value => interactiveViewportCaseId = value;`, context);
+
+  context.setViewportCaseId('case-cancel-race');
+  context.pollViewport('case-cancel-race');
+  const pollPromise = timers.shift().callback();
+  await Promise.resolve();
+  schema.interactiveSession.status = 'CANCELLED';
+  context.stopViewport('Viewport stopped (CANCELLED).');
+  schema.interactiveSession.status = 'RUNNING'; // Same case starts a fresh authorized session.
+  context.setViewportCaseId('case-cancel-race');
+  resolveFetch({ status: 200, ok: true, blob: async () => ({ type: 'image/jpeg', size: 512 }) });
+  await pollPromise;
+  assert.equal(image.src, '', 'a successful but late frame must not replace terminal UI state');
+  assert.equal(status.textContent, 'Viewport stopped (CANCELLED).', 'a late response cannot overwrite cancellation status');
+  assert.equal(timers.filter(timer => !timer.cancelled).length, 1,
+    'the fresh session may poll, but the old frame is not applied to it');
+
+  schema.interactiveSession.status = 'CANCELLED';
+  context.stopViewport('Viewport stopped (CANCELLED).');
+  schema.interactiveSession.status = 'RUNNING';
+  context.setViewportCaseId('case-cancel-race');
+  context.pollViewport('case-cancel-race');
+  const noContentTimer = timers.find(timer => !timer.cancelled);
+  const noContentPoll = noContentTimer.callback();
+  noContentTimer.cancelled = true;
+  await Promise.resolve();
+  schema.interactiveSession.status = 'CANCELLED';
+  context.stopViewport('Viewport stopped (CANCELLED).');
+  resolveFetch({ status: 204, ok: true });
+  await noContentPoll;
+  assert.equal(status.textContent, 'Viewport stopped (CANCELLED).', 'terminal no-content is not rendered as an error');
+  assert.equal(timers.filter(timer => !timer.cancelled).length, 0, 'terminal sessions do not schedule another frame poll');
+});

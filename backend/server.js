@@ -7,7 +7,8 @@
 import express from 'express';
 import fs from 'node:fs';
 import { createServer } from 'node:http';
-import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { isIP } from 'node:net';
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { InvestigationEngine, INSPECTION_MODE } from '../core/investigation_engine.js';
@@ -18,12 +19,11 @@ import { validateInteractiveAction, MAX_INTERACTIVE_SCREENSHOTS, MAX_INTERACTIVE
 import { redactSensitiveUrl } from '../core/investigators/url_redaction.js';
 import { createCaseAccessCredential, verifyCaseAccessCredential } from '../core/case_access.js';
 import { buildEvidenceReport } from '../core/evidence_report.js';
+import { initializeLocalDevelopmentEnvironment } from './local_development_env.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
-
-const PORT = process.env.PORT || 3000;
 
 function secureEqual(left, right) {
   if (typeof left !== 'string' || typeof right !== 'string') return false;
@@ -43,7 +43,13 @@ function parseCookies(header = '') {
   return cookies;
 }
 
-export function createApp({ apiToken = process.env.TRUSTLAYER_API_TOKEN, cases = new Map(), rateLimits = {},
+export function isLoopbackAddress(address) {
+  if (address === '::1') return true;
+  const ipv4 = address?.startsWith('::ffff:') ? address.slice(7) : address;
+  return isIP(ipv4) === 4 && Number(ipv4.split('.')[0]) === 127;
+}
+
+export function createApp({ apiToken = process.env.TRUSTLAYER_API_TOKEN, localDevelopmentAuth = false, cases = new Map(), rateLimits = {},
   investigateCase = icase => InvestigationEngine.investigate(icase) } = {}) {
   if (typeof apiToken !== 'string' || Buffer.byteLength(apiToken) < 32 || Buffer.byteLength(apiToken) > 1024) {
     throw new Error('TRUSTLAYER_API_TOKEN must contain 32 to 1024 bytes of random secret material.');
@@ -53,6 +59,7 @@ export function createApp({ apiToken = process.env.TRUSTLAYER_API_TOKEN, cases =
   const sessions = new Map();
   const loginAttempts = new Map();
   const requestBuckets = new Map();
+  const interactiveIdempotencyKey = randomBytes(32);
   const maxCases = 1000;
   const activeCaseLimit = 16;
   const sseClients = new Set();
@@ -106,8 +113,15 @@ export function createApp({ apiToken = process.env.TRUSTLAYER_API_TOKEN, cases =
     attempt.count++;
     loginAttempts.set(ip, attempt);
     if (loginAttempts.size > 1024) loginAttempts.delete(loginAttempts.keys().next().value);
+    const hasToken = typeof req.body?.token === 'string' && req.body.token.length > 0;
+    const localSessionAllowed = localDevelopmentAuth
+      && process.env.NODE_ENV !== 'production'
+      && !hasToken
+      && isLoopbackAddress(req.socket.remoteAddress)
+      && isLoopbackAddress(req.socket.localAddress)
+      && originMatches(req);
     if (req.get('origin') && !originMatches(req)) return res.status(403).json({ error: 'Origin rejected.' });
-    if (!secureEqual(req.body?.token, apiToken)) return res.status(401).json({ error: 'Invalid API credentials.' });
+    if (!localSessionAllowed && !secureEqual(req.body?.token, apiToken)) return res.status(401).json({ error: 'Invalid API credentials.' });
     loginAttempts.delete(ip);
     for (const [id, session] of sessions) if (session.expiresAt <= now) sessions.delete(id);
     if (sessions.size >= 2048) return res.status(503).json({ error: 'Session capacity reached; retry later.' });
@@ -115,6 +129,23 @@ export function createApp({ apiToken = process.env.TRUSTLAYER_API_TOKEN, cases =
     sessions.set(sessionId, { expiresAt: now + sessionTtlMs });
     res.setHeader('Set-Cookie', `${sessionCookieName}=${sessionId}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(sessionTtlMs / 1000)}${cookieSecure ? '; Secure' : ''}`);
     res.setHeader('Cache-Control', 'no-store');
+    return res.status(204).end();
+  });
+
+  // Browser-local sign-out must also clear stale HttpOnly cookies after a
+  // backend restart has invalidated its in-memory session table. It only
+  // expires credentials and requires an exact same-origin request.
+  app.post('/api/auth/clear', (req, res) => {
+    if (!originMatches(req)) return res.status(403).json({ error: 'Origin rejected.' });
+    const sessionId = parseCookies(req.headers.cookie).get(sessionCookieName);
+    if (sessionId) sessions.delete(sessionId);
+    const expired = [`${sessionCookieName}=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0${cookieSecure ? '; Secure' : ''}`];
+    for (const cookieName of parseCookies(req.headers.cookie).keys()) {
+      if (/^trustlayer_case_TL-\d{4}-\d{4}-\d{4}-[A-Z0-9]{3,12}$/.test(cookieName)) {
+        expired.push(`${cookieName}=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0${cookieSecure ? '; Secure' : ''}`);
+      }
+    }
+    res.setHeader('Set-Cookie', expired);
     return res.status(204).end();
   });
 
@@ -338,44 +369,93 @@ app.post('/api/cases/:id/interactions', async (req, res) => {
     icase._publishInteractiveObservation?.({ type: 'action_rejected', observation: 'Investigator action rejected by the interaction schema.' });
     return res.status(400).json({ error: 'Invalid interaction action.', details: validation.errors });
   }
-  if (req.body.action.type === 'screenshot' && icase.schema.interactiveSession.screenshotCount >= MAX_INTERACTIVE_SCREENSHOTS) return res.status(429).json({ error: 'Interactive screenshot limit reached.' });
-  const pointerMove = req.body.action.type === 'pointer_move';
-  if (!consumeLimit(requestBuckets, `interact:${req.socket.remoteAddress || 'unknown'}:${icase.id}`, {
-    limit: pointerMove ? 120 : 30, windowMs: 60_000
-  })) return res.status(429).json({ error: 'Interaction request rate limit reached.' });
-  icase._publishInteractiveObservation?.({ type: 'action_accepted', observation: `Investigator ${req.body.action.type} action accepted for worker validation.` });
-  const result = await globalJobController.interact(icase.id, req.body?.action);
-  if (!result.ok) {
-    icase._publishInteractiveObservation?.({ type: 'action_rejected', observation: 'Investigator action was rejected by the worker session or destination policy.' });
-    return res.status(409).json({ error: result.error });
+  const action = req.body.action;
+  const actionId = req.body.actionId;
+  if (actionId !== undefined && (typeof actionId !== 'string' || !/^[a-f0-9]{32}$/.test(actionId))) {
+    return res.status(400).json({ error: 'Invalid interaction request identifier.' });
   }
-  if (!pointerMove) icase.schema.interactiveSession.actionCount++;
-  icase.schema.interactiveSession.currentUrl = result.url || icase.schema.interactiveSession.currentUrl;
-  if (result.screenshotBase64) {
-    try {
-      const bytes = Buffer.from(result.screenshotBase64, 'base64');
-      if (bytes.length < 1000 || bytes.length > 5 * 1024 * 1024 || bytes.readUInt32BE(16) > 1280 || bytes.readUInt32BE(20) > 800 || !bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) throw new Error('invalid image');
-      const artifactId = randomUUID().replaceAll('-', '');
-      const storageRoot = path.resolve(rootDir, 'data', 'screenshots');
-      fs.mkdirSync(storageRoot, { recursive: true });
-      const artifactPath = path.resolve(storageRoot, `${icase.id}-interactive-${artifactId}.png`);
-      if (!artifactPath.startsWith(storageRoot + path.sep)) throw new Error('invalid path');
-      fs.writeFileSync(artifactPath, bytes, { flag: 'wx', mode: 0o600 });
-      if (!icase._interactiveArtifacts) icase._interactiveArtifacts = new Map();
-      icase._interactiveArtifacts.set(artifactId, artifactPath);
-      const evidence = icase.addEvidence('OBSERVED', 'screenshot', 'Interactive Browser Screenshot Captured', 'A bounded viewport screenshot was captured in the isolated worker.', { artifactId, bytes: bytes.length });
-      icase.schema.interactiveSession.screenshotCount++;
-      icase._publishInteractiveObservation?.({ type: 'screenshot', observation: 'Interactive screenshot captured; evidence reference recorded.', url: result.url, evidenceRefs: [evidence.id] });
-      return res.json({ ok: true, action: result.action, url: result.url, artifactId, evidenceId: evidence.id });
-    } catch { return res.status(502).json({ error: 'Screenshot artifact was rejected.' }); }
+  const fingerprint = actionId ? createHmac('sha256', interactiveIdempotencyKey).update(JSON.stringify(action)).digest('hex') : null;
+  const useIdempotency = Boolean(actionId && action.type !== 'pointer_move');
+  const now = Date.now();
+  let requestCache = icase._interactiveActionRequests;
+  if (!requestCache) icase._interactiveActionRequests = requestCache = new Map();
+  for (const [key, entry] of requestCache) if (entry.expiresAt <= now) requestCache.delete(key);
+  if (useIdempotency) {
+    const existing = requestCache.get(actionId);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) return res.status(409).json({ error: 'Interaction request identifier was already used for a different action.' });
+      const cached = await existing.promise;
+      return res.status(cached.status).json(cached.body);
+    }
   }
-  icase._publishInteractiveObservation?.({ type: `action_${result.action}`, observation: `Investigator ${result.action} action completed.`, url: result.url });
-  res.json({ ok: true, action: result.action, url: result.url, ...(result.typed ? { typed: true } : {}) });
+
+  const execute = async () => {
+    if (action.type === 'screenshot' && icase.schema.interactiveSession.screenshotCount >= MAX_INTERACTIVE_SCREENSHOTS) {
+      return { status: 429, body: { error: 'Interactive screenshot limit reached.' } };
+    }
+    const pointerMove = action.type === 'pointer_move';
+    const category = pointerMove ? 'pointer' : 'discrete';
+    const limit = pointerMove ? 120 : 30;
+    if (!consumeLimit(requestBuckets, `interact:${category}:${req.socket.remoteAddress || 'unknown'}:${icase.id}`, { limit, windowMs: 60_000 })) {
+      return { status: 429, body: { error: 'Interaction request rate limit reached.' } };
+    }
+    if (!pointerMove) icase._publishInteractiveObservation?.({ type: 'action_accepted', observation: `Investigator ${action.type} action accepted for worker validation.` });
+    const result = await globalJobController.interact(icase.id, action);
+    if (!result.ok) {
+      if (!pointerMove) icase._publishInteractiveObservation?.({ type: 'action_rejected', observation: 'Investigator action was rejected by the worker session or destination policy.' });
+      return { status: 409, body: { error: result.error } };
+    }
+    if (!pointerMove) icase.schema.interactiveSession.actionCount++;
+    icase.schema.interactiveSession.currentUrl = result.url || icase.schema.interactiveSession.currentUrl;
+    if (pointerMove) return { status: 200, body: { ok: true, action: result.action, url: result.url } };
+    if (result.screenshotBase64) {
+      try {
+        const bytes = Buffer.from(result.screenshotBase64, 'base64');
+        if (bytes.length < 1000 || bytes.length > 5 * 1024 * 1024 || bytes.readUInt32BE(16) > 1280 || bytes.readUInt32BE(20) > 800 || !bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) throw new Error('invalid image');
+        const artifactId = randomUUID().replaceAll('-', '');
+        const storageRoot = path.resolve(rootDir, 'data', 'screenshots');
+        fs.mkdirSync(storageRoot, { recursive: true });
+        const artifactPath = path.resolve(storageRoot, `${icase.id}-interactive-${artifactId}.png`);
+        if (!artifactPath.startsWith(storageRoot + path.sep)) throw new Error('invalid path');
+        fs.writeFileSync(artifactPath, bytes, { flag: 'wx', mode: 0o600 });
+        if (!icase._interactiveArtifacts) icase._interactiveArtifacts = new Map();
+        icase._interactiveArtifacts.set(artifactId, artifactPath);
+        const evidence = icase.addEvidence('OBSERVED', 'screenshot', 'Interactive Browser Screenshot Captured', 'A bounded viewport screenshot was captured in the isolated worker.', { artifactId, bytes: bytes.length });
+        icase.schema.interactiveSession.screenshotCount++;
+        icase._publishInteractiveObservation?.({ type: 'screenshot', observation: 'Interactive screenshot captured; evidence reference recorded.', url: result.url, evidenceRefs: [evidence.id] });
+        return { status: 200, body: { ok: true, action: result.action, url: result.url, artifactId, evidenceId: evidence.id } };
+      } catch { return { status: 502, body: { error: 'Screenshot artifact was rejected.' } }; }
+    }
+    icase._publishInteractiveObservation?.({ type: `action_${result.action}`, observation: `Investigator ${result.action} action completed.`, url: result.url });
+    return { status: 200, body: { ok: true, action: result.action, url: result.url, ...(result.typed ? { typed: true } : {}) } };
+  };
+
+  let execution;
+  if (useIdempotency) {
+    if (requestCache.size >= 64) {
+      const settled = [...requestCache].find(([, entry]) => entry.settled);
+      if (settled) requestCache.delete(settled[0]);
+      else return res.status(429).json({ error: 'Too many interaction requests are pending.' });
+    }
+    const entry = { fingerprint, expiresAt: now + 300_000, settled: false, promise: null };
+    entry.promise = execute().then(outcome => { entry.settled = true; return outcome; }, () => {
+      requestCache.delete(actionId);
+      return { status: 502, body: { error: 'Interaction request could not be completed.' } };
+    });
+    requestCache.set(actionId, entry);
+    execution = entry.promise;
+  } else execution = execute();
+  const outcome = await execution;
+  return res.status(outcome.status).json(outcome.body);
 });
 
 app.get('/api/cases/:id/interactive-viewport', async (req, res) => {
   const icase = findCase(req, res);
   if (!icase) return res.status(404).json({ error: 'Interactive viewport unavailable.' });
+  const sessionStatus = icase.schema.interactiveSession?.status;
+  const sessionEnded = ['ENDED', 'CANCELLED', 'FAILED', 'COMPLETED'].includes(sessionStatus) &&
+    icase.schema.liveInspection?.runtimeSessionActive !== true;
+  if (sessionEnded) return res.status(204).end();
   if (!icase.schema.interactiveSession?.enabled || icase.schema.interactiveSession.status !== 'RUNNING' ||
       icase.schema.liveInspection?.runtimeSessionActive !== true) {
     return res.status(409).json({ error: 'Interactive viewport is unavailable.' });
@@ -384,6 +464,11 @@ app.get('/api/cases/:id/interactive-viewport', async (req, res) => {
     return res.status(429).json({ error: 'Interactive viewport refresh is rate limited.' });
   }
   const frame = await globalJobController.captureViewport(icase.id);
+  // Cancellation or worker termination can race an in-flight capture. Do not
+  // publish a stale frame or turn an expected terminal transition into 409.
+  const latestStatus = icase.schema.interactiveSession?.status;
+  if (['ENDED', 'CANCELLED', 'FAILED', 'COMPLETED'].includes(latestStatus) &&
+      icase.schema.liveInspection?.runtimeSessionActive !== true) return res.status(204).end();
   if (!frame?.ok || typeof frame.viewportBase64 !== 'string') return res.status(409).json({ error: 'Interactive viewport disconnected.' });
   try {
     const bytes = Buffer.from(frame.viewportBase64, 'base64');
@@ -422,6 +507,11 @@ app.post('/api/cases/:id/cancel-live', (req, res) => {
   if (!icase) {
     return res.status(404).json({ error: 'Case not found' });
   }
+
+  const alreadyStopped = icase._abortController?.signal?.aborted === true &&
+    icase.schema.liveInspection?.runtimeSessionActive !== true &&
+    (!icase.schema.interactiveSession?.enabled || ['ENDED', 'CANCELLED', 'FAILED', 'COMPLETED'].includes(icase.schema.interactiveSession.status));
+  if (alreadyStopped) return res.json({ message: 'Live inspection already stopped', caseId: icase.id, alreadyStopped: true });
 
   if (icase._abortController) {
     icase._abortController.abort();
@@ -637,13 +727,19 @@ app.use((err, req, res, next) => {
 const isMainModule = process.argv[1] && path.resolve(process.argv[1]) === __filename;
 if (isMainModule) {
   try {
-    const app = createApp();
+    const localEnvironment = initializeLocalDevelopmentEnvironment({ envFile: path.join(rootDir, '.env') });
+    const localDevelopmentAuth = process.env.NODE_ENV !== 'production';
+    const app = createApp({ localDevelopmentAuth });
     const server = createServer({ maxHeaderSize: 16 * 1024, requestTimeout: 30_000, headersTimeout: 15_000 }, app);
     server.timeout = 30_000;
-    server.listen(PORT, '0.0.0.0', () => {
+    const port = process.env.PORT || 3000;
+    const host = localDevelopmentAuth ? '127.0.0.1' : '0.0.0.0';
+    server.listen(port, host, () => {
       console.log('Trust Layer API server started.');
-      console.log(`   Server listening at http://localhost:${PORT}`);
-      console.log(`   Unified SPA:     http://localhost:${PORT}/`);
+      console.log(`   Authentication: ${localDevelopmentAuth ? 'automatic same-origin session, loopback only' : 'configured API token required'}`);
+      console.log(`   API token configuration source: ${localEnvironment.tokenSource} (secret value suppressed)`);
+      console.log(`   Server listening at http://localhost:${port}`);
+      console.log(`   Unified SPA:     http://localhost:${port}/`);
     });
   } catch {
     console.error('Trust Layer refused startup: configure TRUSTLAYER_API_TOKEN with 32 to 1024 random bytes.');

@@ -20,6 +20,9 @@ describe('URL Rule Engine & Deterministic Risk Aggregator', () => {
     const result = URLRuleEngine.evaluate(parsed, ext.features);
 
     assert.strictEqual(result.classification, 'SAFE');
+    assert.equal(result.outcome, 'UNVERIFIED');
+    assert.equal(result.scope, 'URL_STRUCTURE_ONLY');
+    assert.equal(result.isPreliminary, true);
     assert.strictEqual(result.verdict, 'SAFE');
     assert.strictEqual(result.explanation.includes('No suspicious'), true);
     assert.ok(result.ruleScore <= 24, `Expected score <= 24, got ${result.ruleScore}`);

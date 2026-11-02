@@ -74,182 +74,140 @@ export class RiskAggregator {
 }
 
 export class OverallRiskAggregator {
-  /**
- * Cross-mode result synthesis. URL structural rules and model predictions are
- * indicators; only completed rendered-page behavior can establish a page-level
- * phishing finding in the current architecture.
-   */
-  static aggregate({
-    urlAssessment = null,
-    redirectAssessment = null,
-    pageContentAssessment = null,
-    isTestFixture = false,
-    hasIdentityMismatch = false,
-    hasExfiltration = false,
-    inspectionMode = 'URL_ONLY',
-    modelPrediction = null,
-    modelProbability = null
-  }) {
-    const urlScore = urlAssessment?.ruleScore ?? 0;
-    const urlVerdict = urlAssessment?.classification || 'SAFE';
-
-    const redirectScore = redirectAssessment?.riskScore ?? 0;
+  static aggregate({ urlAssessment = null, redirectAssessment = null, pageContentAssessment = null,
+    isTestFixture = false, inspectionMode = 'URL_ONLY', modelPrediction = null, modelProbability = null,
+    modelConfidenceLevel = null, now = Date.now(), maxEvidenceAgeMs = 24 * 60 * 60 * 1000 } = {}) {
+    const urlScore = Number.isFinite(urlAssessment?.ruleScore) ? urlAssessment.ruleScore : 0;
+    const urlVerdict = urlAssessment?.classification || 'UNAVAILABLE';
+    const redirectScore = Number.isFinite(redirectAssessment?.riskScore) ? redirectAssessment.riskScore : 0;
     const redirectVerdict = redirectAssessment?.riskLevel || null;
-
     const pageRisk = pageContentAssessment?.riskLevel || 'NOT_RUN';
-    const pageVerdict = pageContentAssessment?.verdict || pageContentAssessment?.classification || null;
-    const fullPageInspected = pageContentAssessment?.fullRenderedInspection === true &&
-      pageContentAssessment?.status === 'COMPLETED';
+    const fullPageInspected = pageContentAssessment?.fullRenderedInspection === true && pageContentAssessment?.status === 'COMPLETED';
     const accessDenied = pageContentAssessment?.accessStatus === 'BLOCKED_HTTP_403' || pageContentAssessment?.status === 'CONTENT_UNAVAILABLE';
+    const urlIndicator = ['PHISHING', 'UNDER_REVIEW'].includes(urlVerdict);
+    const redirectIndicator = ['PHISHING', 'UNDER_REVIEW'].includes(redirectVerdict);
+    const modelIndicator = modelPrediction === 'PHISHING';
+    const contentSignals = Array.isArray(pageContentAssessment?.signals) ? pageContentAssessment.signals : [];
+    const verifiedEvidence = (Array.isArray(pageContentAssessment?.verifiedMaliciousEvidence)
+      ? pageContentAssessment.verifiedMaliciousEvidence : []).filter(item => item?.verified === true &&
+      item.provenance === 'OBSERVED' && item.confidenceLevel === 'HIGH' && typeof item.group === 'string' &&
+      Number.isFinite(item.observedAt) && item.observedAt >= 0 &&
+      item.observedAt <= now && now - item.observedAt <= maxEvidenceAgeMs);
+    const suppliedVerifiedEvidence = Array.isArray(pageContentAssessment?.verifiedMaliciousEvidence)
+      ? pageContentAssessment.verifiedMaliciousEvidence.filter(item => item?.verified === true) : [];
+    const invalidVerifiedEvidence = suppliedVerifiedEvidence.length > verifiedEvidence.length;
+    const distinctVerifiedGroups = new Set(verifiedEvidence.map(item => item.group));
+    const malicious = !isTestFixture && fullPageInspected && distinctVerifiedGroups.size >= 2;
+    const contentIndicator = contentSignals.length > 0 || ['SUSPICIOUS', 'CRITICAL', 'HIGH', 'MODERATE'].includes(pageRisk) ||
+      ['PHISHING', 'UNDER_REVIEW'].includes(pageContentAssessment?.verdict || pageContentAssessment?.classification);
 
-    // URL rules are structural heuristics, not proof of an active phishing page.
-    const isUrlPhishing = urlVerdict === 'PHISHING';
-    const isRedirectPhishing = redirectVerdict === 'PHISHING';
-    const isPagePhishing = !isTestFixture && fullPageInspected && pageVerdict === 'PHISHING';
-    const modelPredictsPhishing = modelPrediction === 'PHISHING';
-    const observedPageConflict = fullPageInspected && pageVerdict === 'PHISHING' &&
-      (modelPrediction === 'LEGITIMATE' || urlVerdict === 'SAFE');
-
-    let finalVerdict = 'UNDER_REVIEW';
+    let outcome = 'UNVERIFIED';
+    let legacyFinalVerdict = 'UNDER_REVIEW';
     let finalRiskLevel = 'LOW';
-    let determiningComponent = 'Mode A: URL-Only Assessment';
-    let headline = 'Investigation Incomplete';
-    let summary = 'Available evidence does not support a final conclusion.';
-    let reasons = [];
-    let phishingPrecedenceApplied = false;
+    let determiningComponent = 'Evidence availability';
+    let headline = 'Inspection Unverified';
+    let summary = 'Available evidence is incomplete; no final website safety conclusion is available.';
+    let verdictBasis = 'INSPECTION_INCOMPLETE';
+    let confidenceLevel = 'NONE';
+    const reasons = [];
 
-    // 1. Explicit Test Fixture Designation (Google Safe Browsing Test Harness)
-    if (isPagePhishing) {
-      finalVerdict = 'PHISHING';
-      finalRiskLevel = 'CRITICAL';
-      phishingPrecedenceApplied = true;
-
-      if (isPagePhishing) {
-        determiningComponent = 'Mode C: Page Content & Screenshot Intelligence';
-        headline = hasExfiltration
-          ? 'High-Risk Impersonation & Credential Exfiltration Confirmed'
-          : 'Confirmed Malicious Page Behaviour';
-        summary = pageContentAssessment?.summary || 'An applicable page assessment issued a definitive PHISHING verdict.';
-      }
-      reasons.push(`Phishing precedence enforced: ${determiningComponent} issued a definitive PHISHING verdict.`, summary);
-    }
-    // A known demonstration page does not label its hosting operator as malicious.
-    else if (isTestFixture) {
-      finalVerdict = 'KNOWN_SECURITY_TEST_FIXTURE';
-      finalRiskLevel = 'LOW';
+    if (malicious) {
+      outcome = 'MALICIOUS'; legacyFinalVerdict = 'PHISHING'; finalRiskLevel = 'CRITICAL';
+      determiningComponent = 'Corroborated rendered-page evidence';
+      headline = 'Malicious behavior supported by independent observed evidence';
+      summary = 'At least two independent, current, high-confidence observed evidence groups support this finding.';
+      verdictBasis = 'CORROBORATED_OBSERVED_EVIDENCE'; confidenceLevel = 'HIGH';
+      reasons.push(summary);
+    } else if (isTestFixture) {
+      legacyFinalVerdict = 'KNOWN_SECURITY_TEST_FIXTURE'; finalRiskLevel = 'LOW';
       determiningComponent = 'Security Test Fixture Policy';
-      headline = 'Known Security Test Fixture (Safe Browsing Phishing Demonstration)';
-      summary = 'Target presents phishing credential capture inputs and deceptive software-update dialogs embedded within images, but is identified as an official Google Safe Browsing demonstration test fixture. The hosting domain is not accused of hosting an active malicious campaign.';
-      reasons = [
-        'Target verified as an official Google Safe Browsing security demonstration test fixture.',
-        'Observed phishing inputs and deceptive update graphics are present as intentional test demonstration vectors.',
-        'Hosting domain continuity verified; no malicious exfiltration penalty applied.'
-      ];
-    }
-    // URL phishing labels remain suspicion until page behavior is observed.
-    else if (accessDenied) {
-      finalVerdict = 'UNDER_REVIEW';
-      finalRiskLevel = (isUrlPhishing || isRedirectPhishing) ? 'HIGH' : 'LOW';
-      determiningComponent = 'Live Inspection Access Restriction';
-      headline = 'Access Denied — Target Content Unavailable';
-      summary = 'The target returned an access restriction. This does not establish whether the target page is malicious or safe.';
+      headline = 'Known Security Test Fixture';
+      summary = 'This is a designated security demonstration fixture, not a verdict about its hosting operator.';
+      verdictBasis = 'TEST_FIXTURE_POLICY'; confidenceLevel = 'HIGH';
       reasons.push(summary);
-    }
-    else if (isUrlPhishing || isRedirectPhishing) {
-      finalVerdict = 'UNDER_REVIEW';
-      finalRiskLevel = 'HIGH';
-      determiningComponent = isUrlPhishing ? 'Mode A: URL Rule Engine (Heuristic)' : 'Mode B: Redirect Heuristic';
-      headline = 'High-Risk URL Indicators — Page Not Confirmed';
-      summary = isUrlPhishing
-        ? (urlAssessment?.summary || 'URL structure triggered high-risk phishing heuristics. This does not establish that the page is an active phishing site.')
-        : (redirectAssessment?.summary || 'Redirect indicators require review; they do not establish that the destination is malicious.');
+    } else if (urlIndicator || redirectIndicator || modelIndicator || contentIndicator) {
+      outcome = 'SUSPICIOUS'; legacyFinalVerdict = 'UNDER_REVIEW';
+      const urlOnly = !fullPageInspected;
+      finalRiskLevel = urlVerdict === 'PHISHING' || redirectVerdict === 'PHISHING' || pageRisk === 'HIGH'
+        ? 'HIGH' : (pageRisk === 'MODERATE' || new Set(contentSignals.map(item => item.group).filter(Boolean)).size > 1 ? 'MODERATE' : 'LOW');
+      determiningComponent = contentIndicator ? 'Rendered page content indicators'
+        : (urlIndicator ? 'URL structure heuristics' : (redirectIndicator ? 'Redirect observations' : 'URL model prediction'));
+      headline = urlOnly ? 'Suspicious indicators — page not fully verified' : 'Suspicious indicators observed';
+      summary = accessDenied
+        ? 'Access was denied; the URL indicators remain suspicious, but target page content is unavailable.'
+        : (contentIndicator ? (pageContentAssessment?.summary || 'Page features warrant review; no single feature is treated as proof of phishing.')
+          : (modelIndicator
+            ? `The URL model predicted phishing${Number.isFinite(modelProbability) ? ` (${(modelProbability * 100).toFixed(1)}%)` : ''}; this is a prediction, not verified page evidence.`
+            : (urlAssessment?.summary || redirectAssessment?.summary || 'Structural or redirect indicators warrant review; they do not prove malicious page behavior.')));
+      verdictBasis = contentIndicator ? 'CONTENT_INDICATORS'
+        : (urlIndicator ? 'URL_HEURISTIC' : (redirectIndicator ? 'REDIRECT_HEURISTIC' : 'MODEL_PREDICTION'));
+      confidenceLevel = contentIndicator ? (pageContentAssessment?.confidenceLevel || 'LOW')
+        : (modelIndicator ? (modelConfidenceLevel || 'LOW') : 'LOW');
       reasons.push(summary);
-    }
-    // 3. Under Review: if any executed mode or prediction remains inconclusive
-    else if (urlVerdict === 'UNDER_REVIEW' || redirectVerdict === 'UNDER_REVIEW' || pageRisk === 'MODERATE' || pageRisk === 'HIGH' || modelPredictsPhishing) {
-      finalVerdict = 'UNDER_REVIEW';
-      finalRiskLevel = (pageRisk === 'HIGH') ? 'HIGH' : 'MODERATE';
-      determiningComponent = modelPredictsPhishing && urlVerdict !== 'UNDER_REVIEW' && pageRisk !== 'HIGH' && pageRisk !== 'MODERATE'
-        ? 'URL Model Prediction'
-        : ((redirectVerdict === 'UNDER_REVIEW')
-          ? 'Mode B: Active Redirect Tracer'
-          : ((pageRisk === 'HIGH' || pageRisk === 'MODERATE') ? 'Mode C: Page Content Assessment' : 'Mode A: URL Rule Engine'));
-      const liveInspectionIncomplete = inspectionMode === 'ISOLATED_LIVE' && !fullPageInspected;
-      headline = liveInspectionIncomplete ? 'Live Inspection Incomplete — Under Review' : 'Inconclusive Signals — Under Review';
-      summary = liveInspectionIncomplete
-        ? (pageContentAssessment?.summary || 'The isolated browser did not produce rendered page evidence. No final website safety conclusion is available.')
-        : (modelPredictsPhishing
-          ? `The URL model predicted phishing${Number.isFinite(modelProbability) ? ` (${(modelProbability * 100).toFixed(1)}%)` : ''}; this is a prediction, not verified page evidence.`
-          : 'Available signals exhibit anomalies or unverified domain ownership requiring manual security verification.');
-      reasons.push(liveInspectionIncomplete
-        ? summary
-        : (modelPredictsPhishing ? summary : 'Investigation completed with mixed/uncertain risk signals.'));
-    }
-    // URL analysis and redirect tracing do not establish that rendered page content is safe.
-    else if (!fullPageInspected) {
-      finalVerdict = 'UNDER_REVIEW';
-      finalRiskLevel = 'LOW';
-      determiningComponent = inspectionMode === 'MODE_B'
-        ? 'Mode B: HTTP Redirect Trace (Rendered Page Not Inspected)'
-        : (inspectionMode === 'ISOLATED_LIVE'
-          ? 'Mode C: Isolated Live Inspection (Incomplete)'
-          : 'Mode A: Preliminary URL Assessment (Page Not Fetched)');
-      headline = inspectionMode === 'MODE_B'
-        ? 'Redirect Trace Complete — Rendered Page Not Inspected'
-        : (inspectionMode === 'ISOLATED_LIVE'
-          ? 'Live Inspection Incomplete — Under Review'
-          : 'Initial URL Assessment — Webpage Not Fetched');
-      summary = inspectionMode === 'MODE_B'
-        ? 'The read-only redirect/header trace completed. It did not render the webpage, execute JavaScript, or inspect secondary resources; page safety remains unverified.'
-        : (inspectionMode === 'ISOLATED_LIVE'
-          ? (pageContentAssessment?.summary || 'The isolated browser did not produce rendered page evidence. No final website safety conclusion is available.')
-          : 'URL structure and deterministic rules were assessed. Redirects and page content were not inspected, so this is not a final website safety verdict.');
+    } else if (accessDenied || !fullPageInspected || invalidVerifiedEvidence) {
+      outcome = 'UNVERIFIED'; legacyFinalVerdict = 'UNDER_REVIEW';
+      determiningComponent = accessDenied ? 'Live inspection access restriction' : 'Rendered page evidence unavailable';
+      headline = accessDenied ? 'Access denied — target content unavailable' : 'Inspection incomplete — no safety conclusion';
+      summary = accessDenied
+        ? 'The target returned an access restriction. This does not establish whether the page is malicious or safe.'
+        : (pageContentAssessment?.summary || (inspectionMode === 'MODE_B'
+          ? 'Redirect tracing did not render or inspect page content; the page remains unverified.'
+          : 'URL structure and model predictions are preliminary; page content was not fully inspected.'));
+      if (invalidVerifiedEvidence && !accessDenied) {
+        headline = 'Evidence unavailable or stale — no conclusion';
+        summary = 'Evidence presented as verified was stale, future-dated, or incomplete; no final conclusion is available.';
+      }
+      verdictBasis = accessDenied ? 'ACCESS_RESTRICTED' : (invalidVerifiedEvidence ? 'EVIDENCE_INVALID' : 'INSPECTION_INCOMPLETE');
       reasons.push(summary);
-    }
-    // 4. Clean Safe
-    else {
-      finalVerdict = 'NO_THREAT_OBSERVED';
-      finalRiskLevel = 'LOW';
-      determiningComponent = 'Consolidated Multi-Mode Verification';
-      headline = 'No Phishing Indicators Observed in Completed Checks';
-      summary = 'No phishing indicators were observed in the completed checks. This result does not establish that the site is safe or free of malware, scams, or other threats.';
-      reasons.push('All executed inspection stages completed cleanly.');
+    } else {
+      outcome = 'NO_THREAT_DETECTED'; legacyFinalVerdict = 'NO_THREAT_OBSERVED'; finalRiskLevel = 'LOW';
+      determiningComponent = 'Completed rendered-page checks';
+      headline = 'No threat indicators detected in completed checks';
+      summary = pageContentAssessment?.summary || 'No threat indicators were detected in the completed rendered-page checks; this is not a universal safety guarantee.';
+      verdictBasis = 'COMPLETED_RENDERED_CHECKS'; confidenceLevel = 'LIMITED';
+      reasons.push(summary);
     }
 
-    // Conservative combined numeric score = maximum of comparable executed scores
+    const findings = [...contentSignals];
+    if (urlIndicator) findings.push({ code: `URL_${urlVerdict}_INDICATOR`, group: 'url_intelligence', source: 'URL_RULES',
+      provenance: 'HEURISTIC', confidenceLevel: 'LOW', observedAt: urlAssessment?.timestamp || null,
+      description: urlAssessment?.summary || 'URL structure indicators; not proof of page behavior.' });
+    if (redirectIndicator) findings.push({ code: `REDIRECT_${redirectVerdict}_INDICATOR`, group: 'redirect_intelligence', source: 'REDIRECT_TRACER',
+      provenance: 'OBSERVED', confidenceLevel: 'LOW', observedAt: redirectAssessment?.timestamp || null,
+      description: redirectAssessment?.summary || 'Redirect observations require context.' });
+    if (modelIndicator) findings.push({ code: 'URL_MODEL_PHISHING_PREDICTION', group: 'url_intelligence', source: 'URL_MODEL',
+      provenance: 'MODEL_PREDICTION', confidenceLevel: modelConfidenceLevel || 'LOW', observedAt: null,
+      description: 'Model prediction is an indicator, not verified page evidence.' });
+
     const modeScores = {
       modeA: urlScore,
       modeB: redirectAssessment?.status === 'SUCCESS' ? redirectScore : null,
       modeC: fullPageInspected ? (pageRisk === 'CRITICAL' ? 95 : (pageRisk === 'HIGH' ? 70 : (pageRisk === 'MODERATE' ? 45 : 10))) : null
     };
-
     const validScores = [urlScore];
     if (modeScores.modeB !== null) validScores.push(modeScores.modeB);
     if (modeScores.modeC !== null) validScores.push(modeScores.modeC);
-
-    const combinedScore = isTestFixture && !phishingPrecedenceApplied ? 0 : Math.max(...validScores);
+    const verifiedThreat = outcome === 'MALICIOUS';
+    const conflicts = [];
+    if (verifiedThreat && modelPrediction === 'LEGITIMATE') conflicts.push('URL model predicted LEGITIMATE while independent rendered-page evidence supports a malicious finding.');
+    if (verifiedThreat && urlVerdict === 'SAFE') conflicts.push('URL rules found no high-risk URL pattern while independent rendered-page evidence supports a malicious finding.');
+    if (outcome === 'SUSPICIOUS' && modelPrediction === 'LEGITIMATE' && contentIndicator) {
+      conflicts.push('URL model predicted LEGITIMATE while page heuristics recorded suspicious indicators; neither alone settles the verdict.');
+    }
 
     return {
-      finalVerdict,
-      finalRiskLevel,
-      combinedScore,
-      determiningComponent,
-      headline,
-      summary,
-      reasons,
-      verdictBasis: isPagePhishing ? 'OBSERVED_PAGE_BEHAVIOR' : (accessDenied ? 'ACCESS_RESTRICTED' : (isUrlPhishing ? 'URL_HEURISTIC' : (isRedirectPhishing ? 'REDIRECT_HEURISTIC' : (modelPredictsPhishing ? 'MODEL_PREDICTION' : (isTestFixture ? 'TEST_FIXTURE_POLICY' : 'COMPLETED_CHECKS'))))),
-      verifiedThreat: isPagePhishing,
-      conflicts: observedPageConflict ? [
-        ...(modelPrediction === 'LEGITIMATE' ? ['URL model predicted LEGITIMATE while completed page inspection observed phishing behavior.'] : []),
-        ...(urlVerdict === 'SAFE' ? ['URL rules found no high-risk URL pattern while completed page inspection observed phishing behavior.'] : [])
-      ] : [],
+      outcome, finalVerdict: legacyFinalVerdict, legacyFinalVerdict, finalRiskLevel,
+      combinedScore: isTestFixture && !verifiedThreat ? 0 : Math.max(...validScores),
+      determiningComponent, headline, summary, reasons, findings,
+      reasonCodes: findings.map(item => item.code), confidenceLevel,
+      verdictBasis, verifiedThreat, conflicts,
       modeScores,
       modeStatuses: {
         modeA: urlAssessment ? 'COMPLETED' : 'NOT_RUN',
         modeB: redirectAssessment?.status || 'NOT_RUN',
         modeC: fullPageInspected ? 'COMPLETED' : (pageContentAssessment?.status || 'NOT_RUN')
       },
-      phishingPrecedenceApplied
+      phishingPrecedenceApplied: verifiedThreat
     };
   }
 }

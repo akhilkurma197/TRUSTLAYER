@@ -12,7 +12,7 @@ const successfulChallenge = {
   authenticatedCaseCreation201Count: 1,
   authSession204Count: 1,
   allApplication401ResponseCount: 1,
-  authPromptAccepted: true
+  authSessionEstablished: true
 };
 
 test('only the completed unauthenticated case-creation challenge matches its browser console 401', () => {
@@ -25,7 +25,7 @@ test('only the completed unauthenticated case-creation challenge matches its bro
   for (const field of ['unauthenticatedCaseCreation401Count', 'authenticatedCaseCreation201Count', 'authSession204Count', 'allApplication401ResponseCount']) {
     assert.equal(isExpectedCaseCreationAuthChallenge(authError, { ...successfulChallenge, [field]: 0 }), false, field);
   }
-  assert.equal(isExpectedCaseCreationAuthChallenge(authError, { ...successfulChallenge, authPromptAccepted: false }), false);
+  assert.equal(isExpectedCaseCreationAuthChallenge(authError, { ...successfulChallenge, authSessionEstablished: false }), false);
 });
 
 test('console error diagnostics retain path and phase but never retain message or credential values', () => {

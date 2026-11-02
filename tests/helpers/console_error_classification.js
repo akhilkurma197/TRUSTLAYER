@@ -16,9 +16,9 @@ export function isExpectedCaseCreationAuthChallenge(error, {
   authenticatedCaseCreation201Count,
   authSession204Count,
   allApplication401ResponseCount,
-  authPromptAccepted
+  authSessionEstablished
 } = {}) {
   return Boolean(error?.messageCode === 'RESOURCE_HTTP_401' && error.phase === 'case-creation' &&
     unauthenticatedCaseCreation401Count === 1 && authenticatedCaseCreation201Count === 1 &&
-    authSession204Count === 1 && allApplication401ResponseCount === 1 && authPromptAccepted === true);
+    authSession204Count === 1 && allApplication401ResponseCount === 1 && authSessionEstablished === true);
 }

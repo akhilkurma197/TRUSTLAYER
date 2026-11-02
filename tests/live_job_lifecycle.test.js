@@ -93,6 +93,48 @@ test('startup failure cleanup reports errors and still removes owned output', as
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('proxy readiness failure removes proxy resources and never starts a browser worker', async () => {
+  const dockerCommands = [];
+  const removedContainers = [];
+  const removedDirectories = [];
+  let workerSpawnCount = 0;
+  const controller = new LiveJobController({
+    runDocker: async args => {
+      dockerCommands.push(args);
+      if (args[0] === 'exec') throw Object.assign(new Error('proxy readiness probe failed'), { code: 'ECONNREFUSED' });
+      return '';
+    },
+    spawnWorker: () => { workerSpawnCount++; throw new Error('browser worker must not start'); },
+    removeContainer: name => removedContainers.push(name),
+    removeTempDir: (directory, ownerToken) => {
+      assert.ok(ownerToken, 'startup cleanup must provide the job ownership token');
+      assert.equal(fs.readFileSync(path.join(directory, '.trustlayer-owner'), 'utf8'), ownerToken,
+        'startup cleanup must target the owned temporary directory');
+      removedDirectories.push({ directory, ownerToken });
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+  controller._ensureDockerRuntime = async () => {};
+
+  const job = await controller._executeJob({
+    jobId: 'proxy-readiness-failure', caseId: 'case-proxy-readiness-failure',
+    targetUrl: 'https://example.invalid/', timeoutMs: 10_000,
+    options: { interactive: false, captureDelayMs: 0 }
+  });
+
+  assert.equal(job.status, JOB_STATUS.FAILED);
+  assert.match(job.error, /Failed to start isolated egress proxy/);
+  assert.equal(dockerCommands.some(args => args[0] === 'run' && args.includes('worker/egress_proxy_worker.js')), true,
+    'the proxy container is created before readiness is checked');
+  assert.equal(dockerCommands.filter(args => args[0] === 'exec').length, 20,
+    'the bounded readiness probes all fail before startup is refused');
+  assert.deepEqual(removedContainers, [`trustlayer-egress-${job.jobId}`]);
+  assert.equal(workerSpawnCount, 0, 'browser worker must not spawn after proxy readiness failure');
+  assert.equal(job.cleanupDiagnostics.status, 'CLEANED');
+  assert.equal(removedDirectories.length, 1, 'startup failure cleanup must remove the owned temporary directory');
+  assert.equal(fs.existsSync(removedDirectories[0].directory), false);
+});
+
 test('timeout, cancellation, crash, and output-limit outcomes all run terminal cleanup', async t => {
   for (const scenario of ['timeout', 'cancellation', 'worker-crash', 'output-limit']) {
     await t.test(scenario, async () => {

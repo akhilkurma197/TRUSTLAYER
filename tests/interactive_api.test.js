@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import { createApp } from '../backend/server.js';
 import { createCaseAccessCredential } from '../core/case_access.js';
+import { globalJobController } from '../core/investigators/live_job_controller.js';
 
 test('interactive endpoints require authentication and enforce case/action boundaries', async () => {
   const token = randomBytes(32).toString('base64url');
@@ -44,6 +45,110 @@ test('interactive endpoints require authentication and enforce case/action bound
       'viewport capture must fail closed when no active isolated worker is present');
     assert.equal(cases.get(id).schema.interactiveSession.actionCount, 0);
   } finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('pointer traffic has an independent budget; discrete actions stay available and repeated action IDs execute once', async () => {
+  const token = randomBytes(32).toString('base64url');
+  const id = 'TL-2026-1101-1540-ACT';
+  const access = createCaseAccessCredential();
+  const icase = { id, _caseAccessVerifier: access.verifier, _caseAccessExpiresAt: Date.now() + 60_000,
+    schema: { id, evidence: [], liveInspection: { runtimeSessionActive: true },
+      interactiveSession: { enabled: true, status: 'RUNNING', events: [], actionCount: 0, screenshotCount: 0 } } };
+  const calls = [];
+  const previousInteract = globalJobController.interact;
+  globalJobController.interact = async (caseId, action) => {
+    calls.push({ caseId, type: action.type });
+    return { ok: true, action: action.type, url: 'http://fixture.invalid/' };
+  };
+  const server = createApp({ apiToken: token, cases: new Map([[id, icase]]) }).listen(0, '127.0.0.1');
+  await new Promise(resolve => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const headers = { Authorization: `Bearer ${token}`, 'X-TrustLayer-Case-Access': access.token, 'Content-Type': 'application/json' };
+  const submit = (action, actionId = randomBytes(16).toString('hex')) => fetch(`${base}/api/cases/${id}/interactions`, {
+    method: 'POST', headers, body: JSON.stringify({ actionId, action })
+  });
+  try {
+    for (let index = 0; index < 40; index++) {
+      const response = await submit({ type: 'pointer_move', x: index * 100, y: 5000 });
+      assert.equal(response.status, 200, `pointer movement ${index + 1} should use only the pointer budget`);
+    }
+    for (const action of [
+      { type: 'click', selector: '#safe-button' },
+      { type: 'type', selector: '#note', text: 'harmless text' },
+      { type: 'pointer_scroll', x: 5000, y: 5000, direction: 'down', pixels: 100 }
+    ]) assert.equal((await submit(action)).status, 200, `${action.type} remains available after pointer movement`);
+    assert.equal(calls.filter(call => call.type === 'pointer_move').length, 40);
+
+    const repeatedId = randomBytes(16).toString('hex');
+    const clickAction = { type: 'click', selector: '#safe-button' };
+    const beforeDuplicate = calls.filter(call => call.type === 'click').length;
+    const [first, concurrentDuplicate] = await Promise.all([submit(clickAction, repeatedId), submit(clickAction, repeatedId)]);
+    assert.equal(first.status, 200);
+    assert.equal(concurrentDuplicate.status, 200);
+    assert.equal((await submit(clickAction, repeatedId)).status, 200, 'a completed retry returns its cached result');
+    assert.equal(calls.filter(call => call.type === 'click').length, beforeDuplicate + 1,
+      'the worker receives an action ID only once, including concurrent retries');
+    assert.equal((await submit({ type: 'scroll', direction: 'down', pixels: 50 }, repeatedId)).status, 409,
+      'an action ID cannot be reused for a different action');
+
+    for (let index = 0; index < 26; index++) {
+      assert.equal((await submit({ type: 'back' })).status, 200);
+    }
+    assert.equal((await submit({ type: 'back' })).status, 429,
+      'the independent discrete-action limit still rejects excessive requests');
+  } finally {
+    globalJobController.interact = previousInteract;
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('cancellation is idempotent and an in-flight viewport capture settles without publishing a stale frame', async () => {
+  const token = randomBytes(32).toString('base64url');
+  const id = 'TL-2026-1101-1540-CAN';
+  const access = createCaseAccessCredential();
+  let completeEvents = 0;
+  let releaseCapture;
+  let captureStarted;
+  const started = new Promise(resolve => { captureStarted = resolve; });
+  const icase = { id, _caseAccessVerifier: access.verifier, _caseAccessExpiresAt: Date.now() + 60_000,
+    _abortController: new AbortController(),
+    schema: { id, status: 'COMPLETED', evidence: [], liveInspection: { runtimeSessionActive: true },
+      interactiveSession: { enabled: true, status: 'RUNNING', events: [], actionCount: 0, screenshotCount: 0 } },
+    log() {}, emit(event) { if (event === 'complete') completeEvents++; } };
+  const previousCapture = globalJobController.captureViewport;
+  globalJobController.captureViewport = async () => {
+    captureStarted();
+    return new Promise(resolve => { releaseCapture = resolve; });
+  };
+  const server = createApp({ apiToken: token, cases: new Map([[id, icase]]) }).listen(0, '127.0.0.1');
+  await new Promise(resolve => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const headers = { Authorization: `Bearer ${token}`, 'X-TrustLayer-Case-Access': access.token };
+  try {
+    const frameRequest = fetch(`${base}/api/cases/${id}/interactive-viewport`, { headers });
+    await started;
+    const cancelUrl = `${base}/api/cases/${id}/cancel-live`;
+    const firstCancel = await fetch(cancelUrl, { method: 'POST', headers });
+    assert.equal(firstCancel.status, 200);
+    assert.equal(icase.schema.interactiveSession.status, 'CANCELLED');
+    const repeatedCancel = await fetch(cancelUrl, { method: 'POST', headers });
+    assert.equal(repeatedCancel.status, 200);
+    assert.equal((await repeatedCancel.json()).alreadyStopped, true);
+    assert.equal(completeEvents, 1, 'repeated cancellation must not emit duplicate terminal events');
+
+    releaseCapture({ ok: true, viewportBase64: Buffer.from('stale frame').toString('base64') });
+    const lateFrame = await frameRequest;
+    assert.equal(lateFrame.status, 204, 'late capture settles as no-content once the authorized case is terminal');
+    assert.equal(await lateFrame.text(), '');
+
+    const stoppedFrame = await fetch(`${base}/api/cases/${id}/interactive-viewport`, { headers });
+    assert.equal(stoppedFrame.status, 204, 'new polls after cancellation also settle without a misleading worker error');
+  } finally {
+    globalJobController.captureViewport = previousCapture;
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
   }

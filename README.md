@@ -4,17 +4,17 @@ Trust Layer investigates URLs and QR payloads using URL analysis, redirect traci
 
 ## Start the application
 
-The control API requires a single-operator secret of at least 32 random bytes. Do not commit it, paste it into source files, or include it in logs. In PowerShell, generate an ephemeral secret and start the server in the same shell:
+For local development, run this from the repository root:
 
 ```powershell
-npm install
-$apiSecretBytes = [byte[]]::new(32)
-[System.Security.Cryptography.RandomNumberGenerator]::Fill($apiSecretBytes)
-$env:TRUSTLAYER_API_TOKEN = [Convert]::ToBase64String($apiSecretBytes)
-npm start
+node backend/server.js
 ```
 
-The browser UI prompts for this token on its first API request. It exchanges the token for an eight-hour, HttpOnly, SameSite=Strict session cookie; the token itself is not stored in browser storage or placed in URLs. Direct API clients can send `Authorization: Bearer <token>`. For TLS-terminating reverse proxies set `NODE_ENV=production` and `TRUSTLAYER_PUBLIC_ORIGIN` to the exact public origin (for example `https://trustlayer.example`). Protect the environment variable using the host's secret-management facilities.
+On first non-production startup, Trust Layer creates a cryptographically random `TRUSTLAYER_API_TOKEN` in the gitignored root `.env` file. Later starts reuse it. Keep `.env` private and do not commit or copy its contents into source files or logs. The local server binds to `127.0.0.1`; open `http://localhost:3000`. The dashboard and Investigation Console automatically establish an eight-hour, HttpOnly, SameSite=Strict `/api` session after a same-origin loopback request. You do not need to copy or enter the token. Reloads continue through the cookie, and after a backend restart the browser silently establishes a fresh local session. The API token is never sent to frontend code or browser storage.
+
+The dashboard and Investigation Console headers provide **Replace API token** and **Clear API session** controls. In local development, Replace establishes a new loopback session; in production it requests the configured API token. Clearing signs out the current browser until an explicit replacement or page reload. Local automatic authentication is enabled only by the non-production server entrypoint, requires a loopback TCP peer and exact same-origin `Origin`, and is disabled in production. Do not expose or reverse-proxy the local development listener. For production TLS-terminating reverse proxies set `TRUSTLAYER_PUBLIC_ORIGIN` to the exact public origin (for example `https://trustlayer.example`). Production startup does not load `.env` or generate a token; it requires `TRUSTLAYER_API_TOKEN` from the process environment.
+
+The token can also be supplied through the process environment, which takes precedence over `.env`; startup reports only the configuration source, never its value. The local `.env` loader uses Node built-ins and adds no runtime dependency. `NODE_ENV=test` follows the non-production loopback-only startup behavior; it does not disable API authentication.
 
 This is a single-operator boundary: every holder of the configured API token shares access to all in-memory cases and their screenshots. It is not a multi-user ownership system. Do not share the token among mutually untrusted users or expose the service to the public internet without a separate identity and authorization layer.
 

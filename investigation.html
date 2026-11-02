@@ -5,9 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Trust Layer — Unified Digital Fraud Investigation Workstation</title>
 <meta name="description" content="ML-Based Sandboxed Digital Fraud Investigation Platform: URL Intelligence, Webpage Autopsy, Page Intent ML, Data Flow Mapping, and Forensic Telemetry.">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
 /* ── DESIGN SYSTEM: INDUSTRIAL CYBER FORENSICS ── */
 :root {
@@ -295,6 +292,8 @@ html, body { height: 100%; overflow: hidden; background: var(--bg-deep); color: 
     </div>
 
     <div class="header-actions">
+      <button class="btn" type="button" onclick="window.trustLayerReplaceApiToken()" title="Sign in with the configured local API token">Replace API token</button>
+      <button class="btn" type="button" onclick="window.trustLayerClearApiSession()" title="Clear this browser's Trust Layer session">Clear API session</button>
       <button class="btn btn-primary" id="btn-new-case"><span>+</span> NEW CASE</button>
       <button class="btn" id="btn-case-history">📂 CASE HISTORY</button>
       <button class="btn" id="btn-export-report">📋 EXPORT</button>
@@ -433,14 +432,14 @@ html, body { height: 100%; overflow: hidden; background: var(--bg-deep); color: 
               <div style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;">Layer 1: URL Structure Risk</div>
               <div style="display:flex;align-items:baseline;gap:8px;margin:6px 0;">
                 <span id="layer-url-score" style="font-size:24px;font-weight:800;font-family:var(--font-mono);color:var(--blue);">—</span>
-                <span id="layer-url-class" class="badge SAFE">SAFE</span>
+                <span id="layer-url-class" class="badge UNVERIFIED">NOT ASSESSED</span>
               </div>
               <div id="layer-url-summary" style="font-size:11px;color:var(--text-secondary);line-height:1.5;">Lexical &amp; structural URL rules evaluated.</div>
             </div>
             <div style="background:var(--bg-panel);border:1px solid var(--border);border-radius:6px;padding:12px;">
               <div style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;">Layer 2: Page Behaviour &amp; Content</div>
               <div style="display:flex;align-items:baseline;gap:8px;margin:6px 0;">
-                <span id="layer-page-risk" class="badge SAFE">LOW</span>
+                <span id="layer-page-risk" class="badge UNVERIFIED">NOT INSPECTED</span>
                 <span id="layer-page-clues" style="font-size:11px;color:var(--text-muted);">0 clues</span>
               </div>
               <div id="layer-page-summary" style="font-size:11px;color:var(--text-secondary);line-height:1.5;">DOM structure &amp; screenshot intelligence.</div>
@@ -448,7 +447,7 @@ html, body { height: 100%; overflow: hidden; background: var(--bg-deep); color: 
             <div style="background:var(--bg-panel);border:1px solid var(--border);border-radius:6px;padding:12px;">
               <div style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;">Layer 3: Overall Investigation Verdict</div>
               <div style="display:flex;align-items:baseline;gap:8px;margin:6px 0;">
-                <span id="layer-overall-risk" class="badge SAFE">LOW</span>
+                <span id="layer-overall-risk" class="badge UNVERIFIED">UNVERIFIED</span>
               </div>
               <div id="layer-overall-summary" style="font-size:11px;color:var(--text-secondary);line-height:1.5;">Combined multi-source deterministic assessment.</div>
             </div>
@@ -1035,7 +1034,7 @@ html, body { height: 100%; overflow: hidden; background: var(--bg-deep); color: 
               <span class="field-key">Rules Triggered:</span>
               <span class="field-val" id="rd-triggered-count">0 / 14</span>
               <span class="field-key">Thresholds:</span>
-              <span class="field-val" style="font-family:var(--font-mono);font-size:11px;">SAFE ≤ 24 · UNDER_REVIEW 25–59 · PHISHING ≥ 60</span>
+              <span class="field-val" style="font-family:var(--font-mono);font-size:11px;">NO URL INDICATORS ≤ 24 · UNDER_REVIEW 25–59 · PHISHING ≥ 60</span>
               <span class="field-key">Explanation:</span>
               <span class="field-val" id="rd-score-explanation" style="color:var(--text-secondary);">Run an investigation to evaluate rules.</span>
             </div>
@@ -1218,28 +1217,7 @@ html, body { height: 100%; overflow: hidden; background: var(--bg-deep); color: 
 </div>
 
 <!-- JAVASCRIPT: APPLICATION LOGIC — pure browser JS, no Node imports -->
-<script>
-  window.trustLayerApiFetch = async function(url, options = {}) {
-    const response = await fetch(url, options);
-    if (response.status !== 401) return response;
-    if (!window.__trustLayerAuthPromise) {
-      window.__trustLayerAuthPromise = (async () => {
-        const token = window.prompt('Enter the Trust Layer API token configured by the server operator:');
-        if (!token) return false;
-        const login = await fetch('/api/auth/session', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token })
-        });
-        if (!login.ok) window.alert('Trust Layer API authentication failed. Check the token and try again.');
-        return login.ok;
-      })();
-    }
-    const authenticated = await window.__trustLayerAuthPromise;
-    if (!authenticated) { window.__trustLayerAuthPromise = null; return response; }
-    const retry = await fetch(url, options);
-    if (retry.status === 401) { window.__trustLayerAuthPromise = null; window.alert('Trust Layer API session expired.'); }
-    return retry;
-  };
-</script>
+<script src="/vendor/trustLayerAuth.js"></script>
 <script src="vendor/jsQR.js"></script>
 <script>
 'use strict';
@@ -1920,7 +1898,7 @@ async function loadEvidenceReport(schema) {
     const report = await response.json();
     if (window.activeCase?.id !== report.investigationId) return;
     document.getElementById('ov-report-scope').textContent = report.verdict.scope;
-    statusEl.textContent = `${report.verdict.headline} · ${report.verdict.value} · ${report.verdict.riskLevel} · ${report.verdict.verifiedThreat ? 'observed threat evidence' : report.verdict.basis}`;
+    statusEl.textContent = `${report.verdict.headline} · ${report.verdict.outcome || report.verdict.value} · ${report.verdict.riskLevel} · ${report.verdict.verifiedThreat ? 'observed threat evidence' : report.verdict.basis}`;
     const reasons = document.getElementById('ov-report-reasons');
     reasons.replaceChildren();
     for (const item of report.reasons) {
@@ -1937,9 +1915,13 @@ async function loadEvidenceReport(schema) {
 
 let interactiveViewportTimer = null;
 let interactiveViewportInFlight = false;
+let interactiveViewportGeneration = 0;
 let interactiveViewportObjectUrl = null;
 let interactiveViewportCaseId = null;
 let interactiveViewportLastMoveAt = 0;
+let interactivePointerMoveQueued = null;
+let interactivePointerMoveTimer = null;
+let interactivePointerMoveInFlight = false;
 let interactiveViewportTextBuffer = '';
 let interactiveViewportDisconnected = false;
 
@@ -1953,16 +1935,19 @@ function scheduleInteractiveViewport(caseId, delay = 0) {
   interactiveViewportTimer = setTimeout(async () => {
     interactiveViewportTimer = null;
     if (window.activeCase?.id !== caseId || window.activeCase?.schema?.interactiveSession?.status !== 'RUNNING') return;
+    const generation = interactiveViewportGeneration;
     interactiveViewportInFlight = true;
     try {
       const response = await window.trustLayerApiFetch(`/api/cases/${caseId}/interactive-viewport`);
+      if (response.status === 204) return; // A capture that crossed a terminal transition has no frame to display.
       if (!response.ok) {
         if (response.status === 409) interactiveViewportDisconnected = true;
         throw new Error(response.status === 409 ? 'Worker disconnected; input is disabled.' : `Frame unavailable (HTTP ${response.status}).`);
       }
       const blob = await response.blob();
       if (blob.type !== 'image/jpeg' || blob.size < 256 || blob.size > 1024 * 1024) throw new Error('Invalid bounded viewport frame.');
-      if (window.activeCase?.id !== caseId) return;
+      if (generation !== interactiveViewportGeneration || window.activeCase?.id !== caseId ||
+          window.activeCase?.schema?.interactiveSession?.status !== 'RUNNING') return;
       const image = document.getElementById('interactive-live-viewport');
       const placeholder = document.getElementById('interactive-viewport-placeholder');
       const nextUrl = URL.createObjectURL(blob);
@@ -1978,7 +1963,10 @@ function scheduleInteractiveViewport(caseId, delay = 0) {
       if (placeholder) placeholder.style.display = 'none';
       setViewportDisconnected('Connected to the isolated browser · refreshed live frame.');
     } catch (error) {
-      setViewportDisconnected(`Viewport disconnected or unavailable: ${error.message}`);
+      if (generation === interactiveViewportGeneration && window.activeCase?.id === caseId &&
+          window.activeCase?.schema?.interactiveSession?.status === 'RUNNING') {
+        setViewportDisconnected(`Viewport disconnected or unavailable: ${error.message}`);
+      }
     } finally {
       interactiveViewportInFlight = false;
       const current = window.activeCase;
@@ -1994,6 +1982,8 @@ function scheduleInteractiveViewport(caseId, delay = 0) {
 }
 
 function stopInteractiveViewport(message = 'Viewport stopped.') {
+  interactiveViewportGeneration++;
+  discardQueuedPointerMove();
   if (interactiveViewportTimer) clearTimeout(interactiveViewportTimer);
   interactiveViewportTimer = null;
   interactiveViewportCaseId = null;
@@ -2036,25 +2026,62 @@ function isSensitiveViewportText(text) {
   return text.length >= 24 && /^[A-Za-z0-9_./+=-]+$/.test(text) && new Set(text).size / text.length > 0.55;
 }
 
+function scheduleInteractivePointerMove(delay = 0) {
+  if (interactivePointerMoveTimer || interactivePointerMoveInFlight || !interactivePointerMoveQueued) return;
+  interactivePointerMoveTimer = setTimeout(async () => {
+    interactivePointerMoveTimer = null;
+    const point = interactivePointerMoveQueued;
+    interactivePointerMoveQueued = null;
+    const schema = window.activeCase?.schema;
+    if (!point || schema?.interactiveSession?.status !== 'RUNNING' || interactiveViewportDisconnected) return;
+    interactivePointerMoveInFlight = true;
+    interactiveViewportLastMoveAt = Date.now();
+    const caseId = schema.id;
+    try {
+      const ok = await submitInteractiveAction({ type: 'pointer_move', ...point }, { refreshCase: false, quiet: true });
+      if (!ok && window.activeCase?.id === caseId && window.activeCase?.schema?.interactiveSession?.status === 'RUNNING') {
+        setViewportDisconnected('Pointer update was rejected; clicks, typing, and scrolling remain separately available.');
+      }
+    } finally {
+      interactivePointerMoveInFlight = false;
+      if (interactivePointerMoveQueued) {
+        const remaining = Math.max(0, 500 - (Date.now() - interactiveViewportLastMoveAt));
+        scheduleInteractivePointerMove(remaining);
+      }
+    }
+  }, delay);
+}
+
+function queueInteractivePointerMove(point) {
+  interactivePointerMoveQueued = point;
+  const remaining = Math.max(0, 500 - (Date.now() - interactiveViewportLastMoveAt));
+  scheduleInteractivePointerMove(remaining);
+}
+
+function discardQueuedPointerMove() {
+  if (interactivePointerMoveTimer) clearTimeout(interactivePointerMoveTimer);
+  interactivePointerMoveTimer = null;
+  interactivePointerMoveQueued = null;
+}
+
 function bindInteractiveViewport() {
   const shell = document.getElementById('interactive-viewport-shell');
   const image = document.getElementById('interactive-live-viewport');
   if (!shell || !image || shell.dataset.bound === 'true') return;
   shell.dataset.bound = 'true';
   image.addEventListener('mousemove', event => {
-    const now = Date.now();
-    if (now - interactiveViewportLastMoveAt < 500) return;
     const point = viewportRatios(event);
     if (!point) return;
-    interactiveViewportLastMoveAt = now;
-    void submitInteractiveAction({ type: 'pointer_move', ...point }, { refreshCase: false, quiet: true });
+    queueInteractivePointerMove(point);
   });
   image.addEventListener('click', event => {
+    discardQueuedPointerMove();
     shell.focus();
     const point = viewportRatios(event);
     if (point) void submitInteractiveAction({ type: 'pointer_click', ...point });
   });
   shell.addEventListener('wheel', event => {
+    discardQueuedPointerMove();
     const point = viewportRatios(event);
     if (!point) return;
     event.preventDefault();
@@ -2146,7 +2173,8 @@ async function submitInteractiveAction(action, { refreshCase = true, quiet = fal
   if (!schema?.interactiveSession?.enabled) { failure.textContent = 'This case was not created with interactive browser controls.'; return; }
   if (!quiet) failure.textContent = 'Submitting bounded action…';
   try {
-    const response = await window.trustLayerApiFetch(`/api/cases/${schema.id}/interactions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
+    const actionId = crypto.randomUUID().replaceAll('-', '');
+    const response = await window.trustLayerApiFetch(`/api/cases/${schema.id}/interactions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actionId, action }) });
     const result = await response.json();
     if (!response.ok) {
       const detail = Array.isArray(result.details) ? ` ${result.details.join(' ')}` : '';
@@ -2221,7 +2249,7 @@ function updateCaseUI(schema) {
   const rulePill = document.getElementById('ov-rule-score-pill');
   if (rulePill && ovRuleRes && ovRuleRes.ruleScore !== null) {
     const ruleClassColors = {
-      SAFE:         { bg:'#064e3b', color:'#34d399', border:'#065f46' },
+      SAFE:         { bg:'#1f2937', color:'#cbd5e1', border:'#475569' },
       UNDER_REVIEW: { bg:'#422006', color:'#fbbf24', border:'#713f12' },
       PHISHING:     { bg:'#450a0a', color:'#f87171', border:'#7f1d1d' }
     };
@@ -2229,7 +2257,7 @@ function updateCaseUI(schema) {
     rulePill.style.display = 'inline-flex';
     document.getElementById('ov-rule-score-val').textContent = ovRuleRes.ruleScore;
     const classBadge = document.getElementById('ov-rule-class-badge');
-    classBadge.textContent = ovRuleRes.classification;
+    classBadge.textContent = ovRuleRes.classification === 'SAFE' ? 'NO URL INDICATORS' : ovRuleRes.classification;
     classBadge.setAttribute('style',
       `display:inline-block;padding:2px 8px;border-radius:4px;font-size:9px;font-weight:700;background:${cc.bg};color:${cc.color};border:1px solid ${cc.border};`
     );
@@ -2251,8 +2279,9 @@ function updateCaseUI(schema) {
   const elUrlSum = document.getElementById('layer-url-summary');
   if (elUrlScore) elUrlScore.textContent = urlAssessment.ruleScore ?? (schema.ruleEngineResult?.ruleScore ?? '—');
   if (elUrlClass) {
-    const cls = urlAssessment.classification || schema.ruleEngineResult?.classification || 'SAFE';
-    elUrlClass.textContent = cls;
+    const rawClass = urlAssessment.classification || schema.ruleEngineResult?.classification || 'UNAVAILABLE';
+    const cls = rawClass === 'SAFE' ? 'OBSERVED' : rawClass;
+    elUrlClass.textContent = rawClass === 'SAFE' ? 'NO URL INDICATORS' : rawClass;
     elUrlClass.className = `badge ${cls}`;
   }
   if (elUrlSum) elUrlSum.textContent = urlAssessment.summary || 'URL structure and deterministic rules.';
@@ -2271,8 +2300,9 @@ function updateCaseUI(schema) {
     if (elPageSum) elPageSum.textContent = redirectAssessment.summary || 'Traced HTTP 3xx redirects and security headers.';
   } else if (pageAssessment) {
     if (elPageRisk) {
-      const pr = pageAssessment.riskLevel || 'LOW';
-      elPageRisk.textContent = isFixture ? 'SECURITY TEST FIXTURE' : pr;
+      const pr = pageAssessment.riskLevel || 'NOT_RUN';
+      elPageRisk.textContent = isFixture ? 'SECURITY TEST FIXTURE'
+        : (pageAssessment.fullRenderedInspection ? (pageAssessment.outcome || pr) : 'UNVERIFIED');
       elPageRisk.className = `badge ${isFixture ? 'MODEL' : pr}`;
     }
     if (elPageClues) elPageClues.textContent = `${pageAssessment.screenshotCluesCount || 0} visual clue(s)`;
@@ -2284,7 +2314,9 @@ function updateCaseUI(schema) {
   const elOverallSum = document.getElementById('layer-overall-summary');
   if (elOverallRisk) {
     const ovRisk = overall.finalRiskLevel || overall.riskLevel || 'UNKNOWN';
-    elOverallRisk.textContent = isFixture ? 'KNOWN TEST FIXTURE' : ovRisk;
+    const outcome = overall.outcome || (overall.finalVerdict === 'NO_THREAT_OBSERVED' ? 'NO_THREAT_DETECTED'
+      : (overall.finalVerdict === 'PHISHING' ? (overall.verifiedThreat ? 'MALICIOUS' : 'SUSPICIOUS') : 'UNVERIFIED'));
+    elOverallRisk.textContent = isFixture ? 'KNOWN TEST FIXTURE' : outcome;
     elOverallRisk.className = `badge ${ovRisk}`;
   }
   if (elOverallSum) elOverallSum.textContent = overall.summary || overall.headline || 'Combined multi-source deterministic assessment.';
@@ -2377,7 +2409,7 @@ function updateCaseUI(schema) {
   if (ruleRes && ruleRes.ruleScore !== null) {
     const badgeEl = document.getElementById('url-rule-badge');
     badgeEl.className = `badge ${ruleRes.classification === 'SAFE' ? 'OBSERVED' : (ruleRes.classification === 'PHISHING' ? 'CRITICAL' : 'INFERRED')}`;
-    badgeEl.textContent = ruleRes.classification;
+    badgeEl.textContent = ruleRes.classification === 'SAFE' ? 'NO URL INDICATORS' : ruleRes.classification;
     document.getElementById('url-rule-score-badge').textContent = `${ruleRes.ruleScore} / 100`;
     document.getElementById('url-rule-expl').textContent = ruleRes.explanation || 'Rule evaluation complete.';
 
@@ -2400,9 +2432,9 @@ function updateCaseUI(schema) {
     populateRuleDiagnostics(_rdAllRules, false);
     const rdBadge = document.getElementById('rd-classification-badge');
     rdBadge.className = `badge ${ruleRes.classification === 'SAFE' ? 'OBSERVED' : (ruleRes.classification === 'PHISHING' ? 'CRITICAL' : 'INFERRED')}`;
-    rdBadge.textContent = ruleRes.classification;
+    rdBadge.textContent = ruleRes.classification === 'SAFE' ? 'NO URL INDICATORS' : ruleRes.classification;
     document.getElementById('rd-score-val').textContent = `${ruleRes.ruleScore} / 100`;
-    document.getElementById('rd-category-val').textContent = ruleRes.classification;
+    document.getElementById('rd-category-val').textContent = ruleRes.classification === 'SAFE' ? 'NO URL INDICATORS' : ruleRes.classification;
     document.getElementById('rd-triggered-count').textContent = `${ruleRes.rulesTriggered.length} / ${ruleRes.rulesEvaluated.length} Rules Triggered`;
     document.getElementById('rd-score-explanation').textContent = ruleRes.explanation || 'No rules triggered.';
     if (ruleRes.categoryBreakdown) {

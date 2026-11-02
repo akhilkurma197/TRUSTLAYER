@@ -14,6 +14,7 @@ import { URLParser } from '../core/ml/url_parser.js';
 import { URLFeatureExtractor } from '../core/ml/url_features.js';
 import { URLClassifier } from '../core/ml/url_classifier.js';
 import { InvestigationEngine, STAGE, EVIDENCE_TYPE, CASE_STATE } from '../core/investigation_engine.js';
+import { DNSReconInvestigator } from '../core/investigators/dns_recon.js';
 import { PageStructureExtractor } from '../core/investigators/page_extractor.js';
 import { PageIntentEngine, PAGE_INTENT } from '../core/ml/page_intent_engine.js';
 
@@ -273,16 +274,27 @@ describe('Golden Test Suite — Page Structure & Intent Engine v2.2', () => {
     assert.ok(intent.requestedData.includes('CARD_CVV'));
   });
 
-  it('populates page intent and data flow in end-to-end investigation', async () => {
-    const icase = InvestigationEngine.createCase('http://hdfc-netbanking-verify.xyz/login');
-    await InvestigationEngine.investigate(icase);
+  it('populates simulated HDFC page intent without treating URL-only fixture content as confirmed threat evidence', async () => {
+    const originalResolve = DNSReconInvestigator.resolve;
+    DNSReconInvestigator.resolve = async hostname => ({ status: 'SUCCESS', hostname,
+      ipAddresses: ['203.0.113.8'], dnsRecords: [], nameservers: [], asn: null,
+      tlsMetadata: null, source: 'deterministic test fixture', timestamp: Date.now(), error: null });
+    try {
+      const icase = InvestigationEngine.createCase('http://hdfc-netbanking-verify.xyz/login');
+      await InvestigationEngine.investigate(icase);
 
-    assert.equal(icase.status, CASE_STATE.COMPLETED);
-    assert.equal(icase.schema.pageAnalysis.status, 'COMPLETED');
-    assert.equal(icase.schema.pageAnalysis.intent.primary, PAGE_INTENT.OTP_VERIFICATION);
-    assert.ok(icase.schema.pageAnalysis.dataFlow.length >= 3);
-    assert.ok(icase.schema.trustBreakpoints.some(b => b.type === 'EXTERNAL_CREDENTIAL_EXFILTRATION'));
-    assert.equal(icase.riskLevel, 'CRITICAL');
+      assert.equal(icase.status, CASE_STATE.COMPLETED);
+      assert.equal(icase.schema.pageAnalysis.status, 'COMPLETED');
+      assert.equal(icase.schema.pageAnalysis.intent.primary, PAGE_INTENT.OTP_VERIFICATION);
+      assert.ok(icase.schema.pageAnalysis.dataFlow.length >= 3);
+      assert.ok(icase.schema.trustBreakpoints.some(b => b.type === 'CROSS_DOMAIN_FORM_DESTINATION'));
+      assert.equal(icase.schema.pageContentAssessment.fullRenderedInspection, false);
+      assert.equal(icase.schema.overallAssessment.finalVerdict, 'UNDER_REVIEW');
+      assert.equal(icase.schema.assessment.verificationState, 'UNVERIFIED');
+      assert.equal(icase.riskLevel, 'HIGH');
+    } finally {
+      DNSReconInvestigator.resolve = originalResolve;
+    }
   });
 
   it('runs PageIntentClassifier multi-class softmax model and abstains on empty/ambiguous DOM', async () => {

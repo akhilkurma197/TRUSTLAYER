@@ -40,6 +40,7 @@ import { PageIntentEngine, PAGE_INTENT } from './ml/page_intent_engine.js';
 import { QREngine } from './investigators/qr_engine.js';
 import { URLRuleEngine } from './rules/url_rule_engine.js';
 import { OverallRiskAggregator } from './rules/risk_aggregator.js';
+import { assessContentSignals, hasCompleteRenderedEvidence, recordContentEvidence } from './rules/content_signal_assessor.js';
 import { LiveInspector } from './investigators/live_inspector.js';
 import { IntelligenceSummaryBuilder } from './investigators/intelligence_summary.js';
 import { ScreenshotIntelligenceExtractor } from './investigators/screenshot_intelligence.js';
@@ -1140,25 +1141,31 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
           );
         }
 
-        // Check external POST collector endpoints
+        // Record cross-domain form destinations as indicators only. The page
+        // may configure a destination, but Trust Layer never submits the form.
         for (const form of (isAccessErrorDocument ? [] : pageExt.forms)) {
           if (form.isExternal) {
             icase.schema.networkAnalysis.formSubmissions.push(form.action);
             icase.addGraphNode(`collector_${form.action}`, form.action, 'collector', { action: form.action });
-            icase.addGraphEdge('target', `collector_${form.action}`, 'FORM POST (Exfil)', 'data_flow');
+            icase.addGraphEdge('target', `collector_${form.action}`, 'CROSS-DOMAIN FORM DESTINATION', 'association');
             icase.schema.trustBreakpoints.push({
-              type: 'EXTERNAL_CREDENTIAL_EXFILTRATION',
+              type: 'CROSS_DOMAIN_FORM_DESTINATION',
               expected: parsed.hostname,
               observed: form.action,
-              description: `Credential form submits passwords/data to external server: ${form.action}`
+              description: `Observed form configuration points to a different domain (${form.destinationHost || 'unknown'}); no form data was submitted.`
             });
-            icase.addEvidence(
-              demoConfig ? EVIDENCE_PROVENANCE.SIMULATED : EVIDENCE_PROVENANCE.OBSERVED,
-              'breakpoint',
-              'Trust Breakpoint: External Credential Exfiltration',
-              `Form targets third-party collection endpoint "${form.action}" rather than authentic domain infrastructure.`,
-              form
-            );
+            // Keep the legacy simulated/non-browser ledger item for compatibility.
+            // Completed Mode C DOM evidence is recorded once below with element
+            // references and a separate inferred finding linked to its facts.
+            if (demoConfig || icase.schema.inspectionMode !== INSPECTION_MODE.ISOLATED_LIVE) {
+              icase.addEvidence(
+                demoConfig ? EVIDENCE_PROVENANCE.SIMULATED : EVIDENCE_PROVENANCE.INFERRED,
+                'page',
+                'Content indicator: cross-domain form destination',
+                'A form is configured to target a different domain. This alone does not establish malicious intent; no data was submitted.',
+                { destinationHost: form.destinationHost, method: form.method, observedAt: Date.now() }
+              );
+            }
           }
         }
 
@@ -1373,9 +1380,32 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
       const modelProb = icase.schema.modelResult.probabilityPhishing || 0;
       const isModelPhish = icase.schema.modelResult.prediction === 'PHISHING';
       const isModelLegit = icase.schema.modelResult.prediction === 'LEGITIMATE';
-      const hasExfilForm = formsFound.some(f => f.isExternal);
       const hasIdentityMismatch = identityMismatch;
       const hasPurposeMismatch = icase.schema.pageAnalysis?.intent?.purposeMismatch || false;
+
+      // A successful HTTP status or screenshot alone does not mean rendered
+      // content was fully inspected. Require the worker's completed render
+      // milestone and extracted DOM from the isolated browser.
+      const fullRenderedInspection = hasCompleteRenderedEvidence({
+        isAccessRestricted, isHttpSuccess, inspectionMode: icase.schema.inspectionMode,
+        liveInspection: icase.schema.liveInspection, pageExtraction: liveExtracted
+      });
+      const contentAssessment = assessContentSignals({
+        complete: fullRenderedInspection,
+        pageExtraction: liveExtracted,
+        networkEvents: icase.schema.liveInspection?.networkEvents || [],
+        blockedRequests: icase.schema.liveInspection?.blockedRequests || [],
+        visualFindings: icase.schema.screenshotIntelligence?.findings || [],
+        redirectChain: icase.schema.liveInspection?.redirectChain || icase.schema.redirectAssessment?.redirectChain || [],
+        targetUrl: parsed.normalizedUrl,
+        finalUrl: icase.schema.liveInspection?.finalUrl || httpProbe?.finalUrl || parsed.normalizedUrl,
+        identityMismatch: hasIdentityMismatch,
+        purposeMismatch: hasPurposeMismatch,
+        observedAt: Date.now()
+      });
+      // Keep inspected facts (DOM/network/redirect observations) separate in
+      // the evidence ledger from heuristics inferred from those facts.
+      recordContentEvidence(contentAssessment, (...args) => icase.addEvidence(...args));
 
       // Supporting evidence IDs
       const supportingIds = icase.schema.evidence.map(e => e.id);
@@ -1400,10 +1430,10 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
         limitations.push('Independent registrar certificate / organizational ownership records unverified.');
       }
 
-      // Conflict Detection: Model says legitimate, but page excavation observed external credential exfiltration or purpose mismatch
-      if (isModelLegit && (hasExfilForm || hasIdentityMismatch || hasPurposeMismatch)) {
+      // Keep model predictions separate from observed/derived page indicators.
+      if (isModelLegit && contentAssessment.signals.length > 0) {
         icase.schema.conflictDetected = true;
-        icase.schema.conflictReason = 'URL lexical model predicted Legitimate, but DOM/network analysis observed credential exfiltration, identity discontinuity, or deceptive purpose mismatch.';
+        icase.schema.conflictReason = 'URL model predicted LEGITIMATE while page inspection recorded one or more heuristic content indicators.';
         icase.log('CONFLICT DETECTED: Model/Evidence Conflict triggered', 'warn');
         icase.addEvidence(EVIDENCE_PROVENANCE.INFERRED, 'breakpoint', 'Model vs. Evidence Conflict',
           icase.schema.conflictReason);
@@ -1411,31 +1441,29 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
 
       // ── Rigorous Assessment State Machine ──
 
-      // 1. Confirmed Threat: requires completed HTTP + observed exfiltration, purpose mismatch, or confirmed deceptive discontinuity
-      if (isHttpSuccess && (hasExfilForm || hasPurposeMismatch || (hasIdentityMismatch && formsFound.length > 0))) {
+      // A malicious classification requires multiple independent, verified
+      // observations. DOM configuration alone is never treated as a completed exfiltration.
+      if (contentAssessment.outcome === 'MALICIOUS') {
         icase.schema.assessment.verificationState = VERIFICATION_STATE.HIGH_RISK_CONFIRMED;
         icase.schema.assessment.riskLevel = 'CRITICAL';
-        icase.schema.assessment.headline = hasExfilForm
-          ? 'High-Risk Impersonation & Credential Exfiltration Confirmed'
-          : (hasPurposeMismatch ? 'Deceptive Page Intent & Purpose Mismatch Confirmed' : 'High-Risk Deceptive Infrastructure Confirmed');
-        icase.schema.assessment.summary = hasPurposeMismatch
-          ? (icase.schema.pageAnalysis?.intent?.mismatchReason || 'DOM inspection revealed deceptive intent mismatch between claimed pretext and interactive credential requests.')
-          : 'Live DOM inspection observed credential capture forms submitting to external unverified endpoints.';
+        icase.schema.assessment.headline = 'Corroborated malicious page evidence';
+        icase.schema.assessment.summary = contentAssessment.summary;
         icase.schema.assessment.evidenceSufficient = true;
-        icase.schema.assessment.reasons = icase.schema.trustBreakpoints.map(b => b.description);
+        icase.schema.assessment.reasons = [contentAssessment.summary];
       }
-      // 2. High Risk Suspected: Suspicious URL model output or high-risk rule engine score
-      else if ((isModelPhish && modelProb >= 0.70) || (icase.schema.ruleEngineResult?.classification === 'PHISHING')) {
+      // Structural/model/content indicators are suspicious, never verified fact.
+      else if ((isModelPhish && modelProb >= 0.70) || icase.schema.ruleEngineResult?.classification === 'PHISHING' ||
+        contentAssessment.outcome === 'SUSPICIOUS') {
         icase.schema.assessment.verificationState = VERIFICATION_STATE.HIGH_RISK_SUSPECTED;
-        icase.schema.assessment.riskLevel = 'HIGH';
-        icase.schema.assessment.headline = isHttpSuccess
-          ? 'High-Probability Phishing Infrastructure'
-          : (isUrlOnlyPreliminary
-            ? 'Suspicious URL Signal — Webpage Not Inspected'
-            : 'Suspicious URL Lexical Signal — Investigation Incomplete (HTTP Unreachable)');
-        icase.schema.assessment.summary = `URL rule engine scored ${icase.schema.ruleEngineResult?.ruleScore || 0}/100 (${icase.schema.ruleEngineResult?.classification || 'UNKNOWN'}) and model generated ${(modelProb * 100).toFixed(1)}% phishing probability.`;
-        icase.schema.assessment.evidenceSufficient = isHttpSuccess;
-        icase.schema.assessment.reasons = icase.schema.modelResult.topContributingFeatures.map(f => `${f.name}: ${f.description}`);
+        icase.schema.assessment.riskLevel = contentAssessment.outcome === 'SUSPICIOUS'
+          ? contentAssessment.riskLevel : 'HIGH';
+        icase.schema.assessment.headline = 'Suspicious indicators — not a confirmed page verdict';
+        icase.schema.assessment.summary = contentAssessment.outcome === 'SUSPICIOUS'
+          ? contentAssessment.summary
+          : `URL rules/model indicate risk (${icase.schema.ruleEngineResult?.ruleScore ?? 'unavailable'} rule points); this is a prediction or heuristic, not verified page evidence.`;
+        icase.schema.assessment.evidenceSufficient = false;
+        icase.schema.assessment.reasons = contentAssessment.signals.map(signal => signal.description);
+        if (!icase.schema.assessment.reasons.length) icase.schema.assessment.reasons = [icase.schema.assessment.summary];
       }
       // 3. HTTP Failed with Legitimate Model Signal: strictly INVESTIGATION_INCOMPLETE, NEVER confirmed or malicious
       else if (isAccessRestricted) {
@@ -1467,14 +1495,16 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
           icase.schema.httpAnalysis.error || 'Live page evidence could not be collected.'
         ];
       }
-      // 4. HTTP Succeeded, No Threat Observed, Model Legitimate: Verified Authentic
-      else if (isHttpSuccess && isModelLegit && !hasExfilForm && !hasIdentityMismatch) {
-        icase.schema.assessment.verificationState = VERIFICATION_STATE.EVIDENCE_SUFFICIENT;
+      // Clean-looking URLs and legitimate model predictions cannot complete a
+      // page assessment; only a complete rendered inspection can report absence
+      // of indicators, and that still is not a universal safety assertion.
+      else if (contentAssessment.outcome === 'NO_THREAT_DETECTED') {
+        icase.schema.assessment.verificationState = VERIFICATION_STATE.UNVERIFIED;
         icase.schema.assessment.riskLevel = 'LOW';
-        icase.schema.assessment.headline = 'Authentic Infrastructure Verified';
-        icase.schema.assessment.summary = 'No credential traps, exfiltration endpoints, or identity discontinuities observed across HTTP and DOM inspection layers.';
-        icase.schema.assessment.evidenceSufficient = true;
-        icase.schema.assessment.reasons = ['Observed normal DOM structure and verified official domain continuity.'];
+        icase.schema.assessment.headline = 'No threat indicators detected in completed checks';
+        icase.schema.assessment.summary = contentAssessment.summary;
+        icase.schema.assessment.evidenceSufficient = false;
+        icase.schema.assessment.reasons = [contentAssessment.summary];
       }
       // 5. Default Fallback: Unverified
       else {
@@ -1496,37 +1526,34 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
       const isSecurityTestFixture = screenshotIntelligence?.indicators?.isSecurityTestFixture === true ||
         (/phishing\s*page\s*example/i.test(fixturePageText) &&
           /(test page|safe browsing|social engineering content example)/i.test(fixturePageText));
-      const pageVerdict = isHttpSuccess && !isSecurityTestFixture &&
-        (hasExfilForm || hasPurposeMismatch || (hasIdentityMismatch && formsFound.length > 0)) ? 'PHISHING' : null;
       icase.schema.urlRiskAssessment = {
         ruleScore: icase.schema.ruleEngineResult?.ruleScore ?? 0,
-        classification: icase.schema.ruleEngineResult?.classification || 'SAFE',
-        summary: `Deterministic URL assessment: ${icase.schema.ruleEngineResult?.classification || 'SAFE'} (${icase.schema.ruleEngineResult?.ruleScore ?? 0}/100).`
+        classification: icase.schema.ruleEngineResult?.classification || 'UNAVAILABLE',
+        outcome: 'UNVERIFIED', scope: 'URL_STRUCTURE_ONLY', isPreliminary: true,
+        provenance: 'URL_RULES', confidenceLevel: 'LOW', timestamp: icase.schema.ruleEngineResult?.timestamp || Date.now(),
+        summary: `Preliminary URL-structure assessment: ${icase.schema.ruleEngineResult?.classification || 'UNAVAILABLE'} (${icase.schema.ruleEngineResult?.ruleScore ?? 0}/100); this is not a page verdict.`
       };
       icase.schema.pageContentAssessment = {
-        status: isHttpSuccess ? (icase.schema.inspectionMode === INSPECTION_MODE.ISOLATED_LIVE ? 'COMPLETED' : 'PARTIAL')
-          : (isAccessRestricted ? 'CONTENT_UNAVAILABLE' : (hasHttpResponse ? 'HTTP_ERROR_DOCUMENT' : 'NOT_RUN')),
-        fullRenderedInspection: isHttpSuccess && icase.schema.inspectionMode === INSPECTION_MODE.ISOLATED_LIVE,
+        status: fullRenderedInspection ? 'COMPLETED' : (isHttpSuccess ? 'PARTIAL'
+          : (isAccessRestricted ? 'CONTENT_UNAVAILABLE' : (hasHttpResponse ? 'HTTP_ERROR_DOCUMENT' : 'NOT_RUN'))),
+        fullRenderedInspection,
         accessStatus: icase.schema.accessStatus || (hasHttpResponse ? 'HTTP_RESPONSE' : 'NO_RESPONSE'),
         renderStatus: icase.schema.renderStatus || 'RENDER_UNKNOWN',
         screenshotStatus: icase.schema.screenshotStatus || 'NOT_CAPTURED',
-        verdict: pageVerdict,
-        riskLevel: isAccessRestricted ? 'NOT_RUN' : (pageVerdict ? 'CRITICAL' :
-          ((screenshotIntelligence?.findings || []).some(f => ['FAKE_SOFTWARE_UPDATE', 'SOCIAL_ENGINEERING'].includes(f.category)) ? 'MODERATE' :
-            (isHttpSuccess ? 'LOW' : 'NOT_RUN'))),
-        hasExfiltration: hasExfilForm,
+        outcome: contentAssessment.outcome,
+        verdict: contentAssessment.outcome === 'MALICIOUS' ? 'PHISHING'
+          : (contentAssessment.outcome === 'SUSPICIOUS' ? 'UNDER_REVIEW' : null),
+        riskLevel: contentAssessment.riskLevel,
+        confidenceLevel: contentAssessment.confidenceLevel,
+        observations: contentAssessment.observations,
+        signals: contentAssessment.signals,
+        summary: contentAssessment.summary,
+        hasExternalSensitiveFormDestination: contentAssessment.signals.some(signal => signal.code === 'SENSITIVE_FORM_CROSS_DOMAIN_DESTINATION'),
         hasCredentialsTrap: formsFound.some(form => form.hasPassword || form.hasSensitive) ||
           screenshotIntelligence?.indicators?.hasCredentialsPrompt === true,
         hasFakeSoftwareUpdate: screenshotIntelligence?.indicators?.hasFakeSoftwareUpdate === true,
         isSecurityTestFixture,
-        screenshotCluesCount: screenshotIntelligence?.findings?.length || 0,
-        summary: pageVerdict
-          ? icase.schema.assessment.summary
-          : (isAccessRestricted
-            ? 'HTTP 403 access restriction. The captured screenshot shows the response document only; the target site content and intent are not assessed.'
-            : (!isHttpSuccess && icase.schema.inspectionMode === INSPECTION_MODE.ISOLATED_LIVE
-            ? `Rendered page assessment unavailable: ${icase.schema.httpAnalysis.error || 'isolated inspection did not complete.'}`
-            : 'Page intent and security signals are recorded separately; functional login fields alone do not establish phishing.'))
+        screenshotCluesCount: screenshotIntelligence?.findings?.length || 0
       };
       const overall = OverallRiskAggregator.aggregate({
         urlAssessment: icase.schema.urlRiskAssessment,
@@ -1534,10 +1561,10 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
         pageContentAssessment: icase.schema.pageContentAssessment,
         isTestFixture: isSecurityTestFixture,
         hasIdentityMismatch,
-        hasExfiltration: hasExfilForm,
         inspectionMode: icase.schema.inspectionMode || 'URL_ONLY',
         modelPrediction: icase.schema.modelResult.prediction,
-        modelProbability: icase.schema.modelResult.probabilityPhishing
+        modelProbability: icase.schema.modelResult.probabilityPhishing,
+        modelConfidenceLevel: icase.schema.modelResult.confidenceLevel
       });
       icase.schema.overallAssessment = overall;
       icase.schema.assessment.verdict = overall.finalVerdict;
@@ -1552,9 +1579,7 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
       } else if (overall.finalVerdict === 'NO_THREAT_OBSERVED') {
         icase.schema.assessment.verificationState = VERIFICATION_STATE.UNVERIFIED;
         icase.schema.assessment.evidenceSufficient = false;
-      } else {
-        icase.schema.assessment.verificationState = VERIFICATION_STATE.EVIDENCE_SUFFICIENT;
-      }
+      } else icase.schema.assessment.verificationState = VERIFICATION_STATE.UNVERIFIED;
       icase.schema.assessment.riskLevel = overall.finalRiskLevel;
       icase.schema.assessment.headline = overall.headline;
       icase.schema.assessment.summary = overall.summary;
@@ -1571,8 +1596,8 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
           ],
           actual: [
             { step: 'Unverified Domain', label: host, icon: '🎭', risk: 'critical' },
-            { step: 'Credential Action', label: icase.schema.networkAnalysis.formSubmissions[0] || 'Third-Party Capture', icon: '📤', risk: 'critical' },
-            { step: 'Attacker Outcome', label: 'Credential Exfiltration', icon: '🚨', risk: 'critical' }
+            { step: 'Configured Form Destination', label: icase.schema.networkAnalysis.formSubmissions[0] || 'Not observed', icon: '📤', risk: 'moderate' },
+            { step: 'Outcome', label: 'Unverified — no form submission was performed', icon: '❔', risk: 'moderate' }
           ]
         };
       }

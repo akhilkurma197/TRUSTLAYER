@@ -1,7 +1,9 @@
 export const INTERACTIVE_ACTIONS = Object.freeze(['navigate', 'back', 'forward', 'reload', 'scroll', 'click', 'type', 'screenshot',
   'pointer_move', 'pointer_click', 'pointer_scroll', 'type_focused', 'key']);
 export const MAX_INTERACTIVE_ACTIONS = 20;
-export const MAX_INTERACTIVE_POINTER_MOVES = 120;
+// At most one pointer update every 500 ms for the fixed 120-second session.
+export const MAX_INTERACTIVE_POINTER_MOVES = 240;
+export const MAX_PENDING_INTERACTIVE_ACTIONS = 8;
 export const MAX_INTERACTIVE_SCREENSHOTS = 5;
 export const MAX_INTERACTIVE_VIEWPORT_FRAMES = 240;
 export const MAX_INTERACTIVE_VIEWPORT_FRAME_BYTES = 512 * 1024;

@@ -317,6 +317,14 @@ export class SSRFGuard {
         }
       }
     } catch {
+      if (process.env.TRUSTLAYER_DISABLE_DOH_FALLBACK === '1') {
+        return {
+          allowed: false,
+          blockedReason: 'DNS resolution failed; direct DNS-over-HTTPS fallback is disabled by the active fail-closed probe policy.',
+          resolvedIps: [],
+          canonicalUrl
+        };
+      }
       // A slow operating-system resolver must not stall live inspection. Use
       // DNS-over-HTTPS as a bounded fallback, then validate all returned IPs.
       const queryType = async (type) => {

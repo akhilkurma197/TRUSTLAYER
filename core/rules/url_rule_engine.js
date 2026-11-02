@@ -33,6 +33,8 @@ export class URLRuleEngine {
         ruleScore: 0,
         classification: 'UNDER_REVIEW',
         verdict: 'UNDER_REVIEW',
+        outcome: 'UNVERIFIED', scope: 'URL_STRUCTURE_ONLY', isPreliminary: true,
+        provenance: 'URL_RULES', confidenceLevel: 'NONE',
         rulesEvaluated: [],
         rulesTriggered: [],
         categoryBreakdown: {},
@@ -70,6 +72,9 @@ export class URLRuleEngine {
       ruleScore: aggregateResult.score,
       classification: aggregateResult.classification,
       verdict: aggregateResult.classification,
+      outcome: aggregateResult.classification === 'PHISHING' || aggregateResult.classification === 'UNDER_REVIEW'
+        ? 'SUSPICIOUS' : 'UNVERIFIED',
+      scope: 'URL_STRUCTURE_ONLY', isPreliminary: true, provenance: 'URL_RULES', confidenceLevel: 'LOW',
       rulesEvaluated,
       rulesTriggered: triggered,
       categoryBreakdown: aggregateResult.categoryBreakdown,

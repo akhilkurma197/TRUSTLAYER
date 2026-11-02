@@ -792,7 +792,7 @@ async function runInteractiveSession(page, context, durationMs) {
     }
     if (pointerMove) pointerMoveCount++;
     else count++;
-    emit('action_started', `Investigator requested ${action.type}.`);
+    if (!pointerMove) emit('action_started', `Investigator requested ${action.type}.`);
     let response = { requestId, ok: true, action: action.type, url: redactSensitiveUrl(page.url()) };
     try {
       const timeout = { timeout: INTERACTION_TIMEOUT_MS };
@@ -877,14 +877,18 @@ async function runInteractiveSession(page, context, durationMs) {
         screenshotCount++;
       }
       response.url = redactSensitiveUrl(page.url());
-      const pageState = await page.evaluate(() => ({ titleLength: document.title.length,
-        visibleTextLength: document.body?.innerText?.length || 0, formCount: document.forms.length,
-        inputTypes: [...document.querySelectorAll('input')].slice(0, 32).map(input => input.type || 'text') }));
-      emit('dom_change', `Page state metadata: ${JSON.stringify(pageState).slice(0, 400)}.`);
-      emit('action_completed', `Investigator ${action.type} action completed.`);
+      if (pointerMove) {
+        if (pointerMoveCount % 20 === 0) emit('pointer_position_sampled', 'Coalesced pointer position updated.');
+      } else {
+        const pageState = await page.evaluate(() => ({ titleLength: document.title.length,
+          visibleTextLength: document.body?.innerText?.length || 0, formCount: document.forms.length,
+          inputTypes: [...document.querySelectorAll('input')].slice(0, 32).map(input => input.type || 'text') }));
+        emit('dom_change', `Page state metadata: ${JSON.stringify(pageState).slice(0, 400)}.`);
+        emit('action_completed', `Investigator ${action.type} action completed.`);
+      }
     } catch (error) {
       response = { requestId, ok: false, error: 'Action could not be completed under browser policy.' };
-      emit('action_failed', `Investigator ${action.type} action failed.`);
+      if (!pointerMove) emit('action_failed', `Investigator ${action.type} action failed.`);
     }
     process.stdout.write(`TL_RESPONSE:${JSON.stringify(response)}\n`);
   };

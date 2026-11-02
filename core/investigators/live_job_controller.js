@@ -21,7 +21,7 @@ import { execFileAsync } from '../async_process.js';
 import { SSRFGuard } from './ssrf_guard.js';
 import { hasVerifiedChromiumSandbox } from './chromium_sandbox_status.js';
 import { validateInteractiveAction, MAX_INTERACTIVE_ACTIONS, MAX_INTERACTIVE_POINTER_MOVES, MAX_INTERACTIVE_VIEWPORT_FRAMES,
-  INTERACTION_TIMEOUT_MS, MAX_SESSION_MS } from '../interactive_action.js';
+  MAX_PENDING_INTERACTIVE_ACTIONS, INTERACTION_TIMEOUT_MS, MAX_SESSION_MS } from '../interactive_action.js';
 import { validateTestLocalFixturePolicyFromProcess, validateTestLocalFixtureUrl } from './test_local_fixture.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -241,6 +241,9 @@ export class LiveJobController {
     this.cleanupRecovery = new Map();
     this._testLocalFixturePolicy = null;
     this._testRuntimeFailureDiagnostics = null;
+    // Injectable only to exercise startup ordering without a Docker daemon.
+    this._runDocker = options.runDocker || runDocker;
+    this._spawnWorker = options.spawnWorker || ((args, spawnOptions) => spawn('docker', args, spawnOptions));
     this.removeContainer = options.removeContainer || (name => runDocker(['rm', '-f', name], { timeout: 5000 }));
     this.removeTempDir = options.removeTempDir || removeOwnedTempDir;
     this.terminateChild = options.terminateChild || terminateChildProcess;
@@ -450,7 +453,7 @@ export class LiveJobController {
     };
     const containerStartAt = Date.now();
     try {
-      await runDocker([
+      await this._runDocker([
         'run', '-d', '--name', egressContainerName,
         '--network=trustlayer-isolated-net', `--network-alias=${proxyAlias}`,
         '--user=pwuser', '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=32m',
@@ -467,12 +470,12 @@ export class LiveJobController {
       ]);
       stageTimings.container_start_ms += Date.now() - containerStartAt;
       const proxyStartAt = Date.now();
-      await runDocker(['network', 'connect', this._testLocalFixturePolicy?.networkName || 'trustlayer-egress-net', egressContainerName]);
+      await this._runDocker(['network', 'connect', this._testLocalFixturePolicy?.networkName || 'trustlayer-egress-net', egressContainerName]);
 
       let proxyReady = false;
       for (let attempt = 0; attempt < 20 && !proxyReady; attempt++) {
         try {
-          await runDocker(['exec', egressContainerName, 'node', '-e',
+          await this._runDocker(['exec', egressContainerName, 'node', '-e',
             "const n=require('node:net').connect(3128,'127.0.0.1');n.on('connect',()=>{n.destroy();process.exit(0)});n.on('error',()=>process.exit(1))"]);
           proxyReady = true;
         } catch {
@@ -583,7 +586,7 @@ export class LiveJobController {
         ...(job.options?.interactive ? ['--interactive=1'] : []),
         '--handoffGrace=2500'
       ];
-      child = spawn('docker', dockerArgs, { stdio: [job.options?.interactive ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+      child = this._spawnWorker(dockerArgs, { stdio: [job.options?.interactive ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
 
       let stderr = '';
       const appendBounded = (current, chunk) => (current + chunk.toString('utf8')).slice(-64 * 1024);
@@ -616,6 +619,7 @@ export class LiveJobController {
         workerClosedAt: null,
         interactiveEndedAt: null,
         pendingInteractions: new Map(),
+        pendingActionSlots: 0,
         pointerMoveCount: 0,
         viewportCaptureCount: 0,
         lastViewportCaptureAt: 0,
@@ -961,31 +965,41 @@ export class LiveJobController {
         !Number.isFinite(handle.sessionDeadline) || Date.now() >= handle.sessionDeadline) {
       return { ok: false, error: 'Interactive browser session is unavailable.' };
     }
+    handle.pendingActionSlots = Number.isSafeInteger(handle.pendingActionSlots) ? handle.pendingActionSlots : 0;
+    if (handle.pendingActionSlots >= MAX_PENDING_INTERACTIVE_ACTIONS) return { ok: false, error: 'Interactive action queue is full; wait for an action to complete.' };
+    handle.pendingActionSlots++;
+    let slotReleased = false;
+    const releaseSlot = () => {
+      if (slotReleased) return;
+      slotReleased = true;
+      handle.pendingActionSlots = Math.max(0, handle.pendingActionSlots - 1);
+    };
     if (action.type === 'pointer_move') {
       handle.pointerMoveCount = Number.isSafeInteger(handle.pointerMoveCount) ? handle.pointerMoveCount : 0;
-      if (handle.pointerMoveCount >= MAX_INTERACTIVE_POINTER_MOVES) return { ok: false, error: 'Pointer movement limit reached.' };
+      if (handle.pointerMoveCount >= MAX_INTERACTIVE_POINTER_MOVES) { releaseSlot(); return { ok: false, error: 'Pointer movement limit reached.' }; }
       handle.pointerMoveCount++;
     } else {
-      if (handle.interactionCount >= MAX_INTERACTIVE_ACTIONS) return { ok: false, error: 'Interaction limit reached.' };
+      if (handle.interactionCount >= MAX_INTERACTIVE_ACTIONS) { releaseSlot(); return { ok: false, error: 'Interaction limit reached.' }; }
       handle.interactionCount++;
     }
     if (action.type === 'navigate') {
       let checked;
       try { checked = await this.validateDestination(action.url); }
-      catch { return { ok: false, error: 'Navigation destination could not be validated.' }; }
-      if (!checked.allowed) return { ok: false, error: 'Navigation was blocked by destination policy.' };
+      catch { releaseSlot(); return { ok: false, error: 'Navigation destination could not be validated.' }; }
+      if (!checked.allowed) { releaseSlot(); return { ok: false, error: 'Navigation was blocked by destination policy.' }; }
       action = { type: 'navigate', url: checked.canonicalUrl };
     }
     const requestId = randomUUID();
     return new Promise(resolve => {
+      const finish = result => { releaseSlot(); resolve(result); };
       const timer = setTimeout(() => {
         handle.pendingInteractions.delete(requestId);
-        resolve({ ok: false, error: 'Interaction timed out; the isolated session was stopped.' });
+        finish({ ok: false, error: 'Interaction timed out; the isolated session was stopped.' });
         handle.cancel?.();
       }, INTERACTION_TIMEOUT_MS);
-      handle.pendingInteractions.set(requestId, { resolve, timer });
+      handle.pendingInteractions.set(requestId, { kind: 'action', resolve: finish, timer });
       try { handle.child.stdin.write(`${JSON.stringify({ requestId, action })}\n`); }
-      catch { clearTimeout(timer); handle.pendingInteractions.delete(requestId); resolve({ ok: false, error: 'Interactive browser session is unavailable.' }); }
+      catch { clearTimeout(timer); handle.pendingInteractions.delete(requestId); finish({ ok: false, error: 'Interactive browser session is unavailable.' }); }
     });
   }
 
@@ -1009,7 +1023,7 @@ export class LiveJobController {
         handle.pendingInteractions.delete(requestId);
         resolve({ ok: false, error: 'Viewport capture timed out.' });
       }, INTERACTION_TIMEOUT_MS);
-      handle.pendingInteractions.set(requestId, { resolve, timer });
+      handle.pendingInteractions.set(requestId, { kind: 'viewport', resolve, timer });
       try { handle.child.stdin.write(`${JSON.stringify({ command: 'CAPTURE_VIEWPORT', requestId })}\n`); }
       catch {
         clearTimeout(timer);

@@ -5,9 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Trust Layer - AI-Driven Pre-Action Security Platform</title>
   <meta name="description" content="Trust Layer: AI-powered dashboard for real-time phishing detection, QR quishing protection, and fake payment screenshot forensics.">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -375,6 +372,8 @@
         <p>Evaluating claim vs. reality across web links, QR codes, and payment proofs.</p>
       </div>
       <div style="display:flex;align-items:center;gap:12px;">
+        <button class="btn" type="button" onclick="window.trustLayerReplaceApiToken()" title="Sign in with the configured local API token">Replace API token</button>
+        <button class="btn" type="button" onclick="window.trustLayerClearApiSession()" title="Clear this browser's Trust Layer session">Clear API session</button>
         <a href="investigation.html" style="text-decoration:none;display:flex;align-items:center;gap:6px;background:rgba(56,189,248,0.12);border:1px solid rgba(56,189,248,0.4);padding:6px 14px;border-radius:20px;font-size:12px;font-weight:700;color:var(--accent-blue);transition:all 0.2s;">
           <span>🛡️</span><span>Launch Investigation Console</span>
         </a>
@@ -567,28 +566,7 @@
   </div>
 </div>
 
-<script>
-  window.trustLayerApiFetch = async function(url, options = {}) {
-    const response = await fetch(url, options);
-    if (response.status !== 401) return response;
-    if (!window.__trustLayerAuthPromise) {
-      window.__trustLayerAuthPromise = (async () => {
-        const token = window.prompt('Enter the Trust Layer API token configured by the server operator:');
-        if (!token) return false;
-        const login = await fetch('/api/auth/session', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token })
-        });
-        if (!login.ok) window.alert('Trust Layer API authentication failed. Check the token and try again.');
-        return login.ok;
-      })();
-    }
-    const authenticated = await window.__trustLayerAuthPromise;
-    if (!authenticated) { window.__trustLayerAuthPromise = null; return response; }
-    const retry = await fetch(url, options);
-    if (retry.status === 401) { window.__trustLayerAuthPromise = null; window.alert('Trust Layer API session expired.'); }
-    return retry;
-  };
-</script>
+<script src="/vendor/trustLayerAuth.js"></script>
 <script src="vendor/jsQR.js"></script>
 <script>
 'use strict';
@@ -1606,7 +1584,7 @@ const Explainability = {
 
     const nodeHTML = (node, i) => {
       const typeLabel = {
-        safe:'✅ SAFE DOMAIN', phishing:'🚨 PHISHING DEST', shortener:'🔀 URL SHORTENER',
+        safe:'NO URL INDICATORS', phishing:'PHISHING INDICATORS', shortener:'🔀 URL SHORTENER',
         redirect:'↩ REDIRECT HOP', unknown:'❓ UNKNOWN'
       }[node.type] || '❓ UNKNOWN';
 
@@ -1990,7 +1968,8 @@ document.addEventListener('DOMContentLoaded', () => {
       scoreEl.textContent = displayScore;
 
       const badgeColors = {
-        SAFE:                         'background:#064e3b;color:#34d399;border-color:#065f46;',
+        SAFE:                         'background:#1f2937;color:#cbd5e1;border-color:#475569;',
+        'NO URL INDICATORS':          'background:#1f2937;color:#cbd5e1;border-color:#475569;',
         UNDER_REVIEW:                 'background:#422006;color:#fbbf24;border-color:#713f12;',
         PHISHING:                     'background:#450a0a;color:#f87171;border-color:#7f1d1d;',
         CRITICAL:                     'background:#450a0a;color:#f87171;border-color:#7f1d1d;',
@@ -1999,8 +1978,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (badgeEl) {
         const ruleResultComplete = hasRuleResult;
-        const badgeText = ruleResultComplete ? (rr.verdict || rr.classification) : 'UNDER REVIEW';
-        const badgeKey = badgeText;
+        const rawBadgeText = ruleResultComplete ? (rr.verdict || rr.classification) : 'UNDER REVIEW';
+        const badgeText = rawBadgeText === 'SAFE' ? 'NO URL INDICATORS' : rawBadgeText;
+        const badgeKey = rawBadgeText === 'SAFE' ? 'NO URL INDICATORS' : badgeText;
         badgeEl.setAttribute('style',
           `display:inline-block;padding:3px 10px;border-radius:4px;font-weight:700;font-size:10px;border:1px solid;${badgeColors[badgeKey] || badgeColors.UNDER_REVIEW}`
         );

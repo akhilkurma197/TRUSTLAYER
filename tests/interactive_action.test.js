@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { hasSensitiveText, isInteractiveSession, isSafePointerTarget, isSafeTextTarget, validateInteractiveAction } from '../core/interactive_action.js';
+import { MAX_INTERACTIVE_POINTER_MOVES } from '../core/interactive_action.js';
 import { LiveJobController, markInteractiveSessionReady, markInteractiveSessionStarted } from '../core/investigators/live_job_controller.js';
 
 test('interactive actions accept only bounded allowlisted parameters', () => {
@@ -67,6 +68,13 @@ test('controller binds an interaction to its active case and enforces the action
   const accepted = await controller.interact('TL-2026-1031-1200-ABC', { type: 'back' });
   assert.equal(accepted.ok, true);
   assert.equal(accepted.action, 'back');
+  const queued = await Promise.all(Array.from({ length: 10 }, () => controller.interact(handle.job.caseId, { type: 'pointer_move', x: 5000, y: 5000 })));
+  assert.equal(queued.filter(result => result.ok).length, 8, 'the supervisor accepts only a bounded number of pending actions');
+  assert.equal(queued.filter(result => /queue is full/.test(result.error || '')).length, 2);
+  assert.equal(handle.pendingActionSlots, 0, 'completed actions release their queue reservations');
+  handle.pointerMoveCount = MAX_INTERACTIVE_POINTER_MOVES - 1;
+  assert.equal((await controller.interact(handle.job.caseId, { type: 'pointer_move', x: 5000, y: 5000 })).ok, true);
+  assert.match((await controller.interact(handle.job.caseId, { type: 'pointer_move', x: 5000, y: 5000 })).error, /Pointer movement limit/);
   handle.interactionCount = 20;
   assert.match((await controller.interact('TL-2026-1031-1200-ABC', { type: 'back' })).error, /limit/);
 });
