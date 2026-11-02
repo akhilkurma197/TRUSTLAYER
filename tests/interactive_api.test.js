@@ -1,9 +1,28 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
-import { createApp } from '../backend/server.js';
+import { consumeTokenBucket, createApp } from '../backend/server.js';
 import { createCaseAccessCredential } from '../core/case_access.js';
 import { globalJobController } from '../core/investigators/live_job_controller.js';
+import { INTERACTION_DISCRETE_BURST, INTERACTION_DISCRETE_PER_MINUTE,
+  INTERACTION_POINTER_BURST, INTERACTION_POINTER_PER_MINUTE } from '../core/interactive_action.js';
+
+test('interactive rate buckets allow bounded bursts and refill at bounded sustained rates', () => {
+  const buckets = new Map();
+  const discrete = { capacity: INTERACTION_DISCRETE_BURST, refillPerMinute: INTERACTION_DISCRETE_PER_MINUTE };
+  for (let index = 0; index < INTERACTION_DISCRETE_BURST; index++) assert.equal(consumeTokenBucket(buckets, 'case:discrete', discrete, 1_000), true);
+  assert.equal(consumeTokenBucket(buckets, 'case:discrete', discrete, 1_000), false, 'the burst ceiling remains enforced');
+  for (let index = 0; index < 3; index++) assert.equal(consumeTokenBucket(buckets, 'case:discrete', discrete, 2_000), true,
+    'three discrete actions refill per second');
+  assert.equal(consumeTokenBucket(buckets, 'case:discrete', discrete, 2_000), false,
+    'sustained traffic above 180/minute remains bounded');
+
+  const pointer = { capacity: INTERACTION_POINTER_BURST, refillPerMinute: INTERACTION_POINTER_PER_MINUTE };
+  for (let index = 0; index < INTERACTION_POINTER_BURST; index++) assert.equal(consumeTokenBucket(buckets, 'case:pointer', pointer, 1_000), true);
+  assert.equal(consumeTokenBucket(buckets, 'case:pointer', pointer, 1_000), false);
+  assert.equal(consumeTokenBucket(buckets, 'case:pointer', pointer, 1_500), true, 'pointer movement refills at 2 requests/second');
+  assert.equal(consumeTokenBucket(buckets, 'case:pointer', pointer, 1_500), false);
+});
 
 test('interactive endpoints require authentication and enforce case/action boundaries', async () => {
   const token = randomBytes(32).toString('base64url');
@@ -50,7 +69,7 @@ test('interactive endpoints require authentication and enforce case/action bound
   }
 });
 
-test('pointer traffic has an independent budget; discrete actions stay available and repeated action IDs execute once', async () => {
+test('pointer traffic has an independent bounded burst; discrete actions stay available and repeated action IDs execute once', async () => {
   const token = randomBytes(32).toString('base64url');
   const id = 'TL-2026-1101-1540-ACT';
   const access = createCaseAccessCredential();
@@ -71,16 +90,18 @@ test('pointer traffic has an independent budget; discrete actions stay available
     method: 'POST', headers, body: JSON.stringify({ actionId, action })
   });
   try {
-    for (let index = 0; index < 40; index++) {
+    for (let index = 0; index < INTERACTION_POINTER_BURST; index++) {
       const response = await submit({ type: 'pointer_move', x: index * 100, y: 5000 });
       assert.equal(response.status, 200, `pointer movement ${index + 1} should use only the pointer budget`);
     }
+    assert.equal((await submit({ type: 'pointer_move', x: 5000, y: 5000 })).status, 429,
+      'pointer movement bursts are bounded independently of discrete actions');
     for (const action of [
       { type: 'click', selector: '#safe-button' },
       { type: 'type', selector: '#note', text: 'harmless text' },
       { type: 'pointer_scroll', x: 5000, y: 5000, direction: 'down', pixels: 100 }
     ]) assert.equal((await submit(action)).status, 200, `${action.type} remains available after pointer movement`);
-    assert.equal(calls.filter(call => call.type === 'pointer_move').length, 40);
+    assert.equal(calls.filter(call => call.type === 'pointer_move').length, INTERACTION_POINTER_BURST);
 
     const repeatedId = randomBytes(16).toString('hex');
     const clickAction = { type: 'click', selector: '#safe-button' };

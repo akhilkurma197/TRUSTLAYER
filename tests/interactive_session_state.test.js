@@ -112,7 +112,8 @@ test('terminal interactive state cannot be overwritten by stale RUNNING data', (
   assert.equal(elements.get('ov-interactive-browser-card').style.display, 'block',
     'terminal session state remains visible so the user can see the actual outcome');
   assert.equal(elements.get('interactive-status').textContent, 'ENDED');
-  assert.match(elements.get('interactive-status-detail').textContent, /session ended/);
+  assert.match(elements.get('interactive-status-detail').textContent, /configured maximum interactive session duration was reached/,
+    'the hard session expiry is reported distinctly from operator cancellation');
   assert.equal(elements.get('interactive-type').disabled, true);
   assert.equal(elements.get('interactive-scroll').disabled, true);
   context.acceptCaseSchema(running);

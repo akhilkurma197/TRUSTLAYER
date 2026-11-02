@@ -15,7 +15,8 @@ import { InvestigationEngine, INSPECTION_MODE } from '../core/investigation_engi
 import { CASE_STATE } from '../core/case_schema.js';
 import { validateEvidenceEvent } from '../core/evidence_event.js';
 import { globalJobController } from '../core/investigators/live_job_controller.js';
-import { validateInteractiveAction, MAX_INTERACTIVE_SCREENSHOTS, MAX_INTERACTIVE_VIEWPORT_FRAME_BYTES } from '../core/interactive_action.js';
+import { validateInteractiveAction, MAX_INTERACTIVE_ACTIONS, MAX_INTERACTIVE_SCREENSHOTS, MAX_INTERACTIVE_VIEWPORT_FRAME_BYTES,
+  INTERACTION_DISCRETE_BURST, INTERACTION_DISCRETE_PER_MINUTE, INTERACTION_POINTER_BURST, INTERACTION_POINTER_PER_MINUTE } from '../core/interactive_action.js';
 import { redactSensitiveUrl } from '../core/investigators/url_redaction.js';
 import { createCaseAccessCredential, verifyCaseAccessCredential } from '../core/case_access.js';
 import { buildEvidenceReport } from '../core/evidence_report.js';
@@ -43,6 +44,27 @@ function parseCookies(header = '') {
   return cookies;
 }
 
+export function consumeTokenBucket(map, key, { capacity, refillPerMinute }, now = Date.now()) {
+  if (!(map instanceof Map) || typeof key !== 'string' || !Number.isFinite(capacity) || capacity < 1 ||
+      !Number.isFinite(refillPerMinute) || refillPerMinute <= 0 || !Number.isFinite(now)) return false;
+  const refillPerMs = refillPerMinute / 60_000;
+  const previous = map.get(key);
+  const elapsed = previous ? Math.max(0, now - previous.updatedAt) : 0;
+  const tokens = previous ? Math.min(capacity, previous.tokens + elapsed * refillPerMs) : capacity;
+  const bucket = { tokens, updatedAt: now };
+  if (tokens < 1) {
+    map.delete(key);
+    map.set(key, bucket);
+    while (map.size > 2048) map.delete(map.keys().next().value);
+    return false;
+  }
+  bucket.tokens -= 1;
+  map.delete(key);
+  map.set(key, bucket);
+  while (map.size > 2048) map.delete(map.keys().next().value);
+  return true;
+}
+
 export function isLoopbackAddress(address) {
   if (address === '::1') return true;
   const ipv4 = address?.startsWith('::ffff:') ? address.slice(7) : address;
@@ -59,6 +81,7 @@ export function createApp({ apiToken = process.env.TRUSTLAYER_API_TOKEN, localDe
   const sessions = new Map();
   const loginAttempts = new Map();
   const requestBuckets = new Map();
+  const interactionBuckets = new Map();
   const interactiveIdempotencyKey = randomBytes(32);
   const maxCases = 1000;
   const activeCaseLimit = 16;
@@ -379,7 +402,6 @@ app.post('/api/cases/:id/interactions', async (req, res) => {
   const now = Date.now();
   let requestCache = icase._interactiveActionRequests;
   if (!requestCache) icase._interactiveActionRequests = requestCache = new Map();
-  for (const [key, entry] of requestCache) if (entry.expiresAt <= now) requestCache.delete(key);
   if (useIdempotency) {
     const existing = requestCache.get(actionId);
     if (existing) {
@@ -395,8 +417,10 @@ app.post('/api/cases/:id/interactions', async (req, res) => {
     }
     const pointerMove = action.type === 'pointer_move';
     const category = pointerMove ? 'pointer' : 'discrete';
-    const limit = pointerMove ? 120 : 30;
-    if (!consumeLimit(requestBuckets, `interact:${category}:${req.socket.remoteAddress || 'unknown'}:${icase.id}`, { limit, windowMs: 60_000 })) {
+    const capacity = pointerMove ? INTERACTION_POINTER_BURST : INTERACTION_DISCRETE_BURST;
+    const refillPerMinute = pointerMove ? INTERACTION_POINTER_PER_MINUTE : INTERACTION_DISCRETE_PER_MINUTE;
+    if (!consumeTokenBucket(interactionBuckets, `interact:${category}:${req.socket.remoteAddress || 'unknown'}:${icase.id}`,
+      { capacity, refillPerMinute })) {
       return { status: 429, body: { error: 'Interaction request rate limit reached.' } };
     }
     if (!pointerMove) icase._publishInteractiveObservation?.({ type: 'action_accepted', observation: `Investigator ${action.type} action accepted for worker validation.` });
@@ -432,14 +456,10 @@ app.post('/api/cases/:id/interactions', async (req, res) => {
 
   let execution;
   if (useIdempotency) {
-    if (requestCache.size >= 64) {
-      const settled = [...requestCache].find(([, entry]) => entry.settled);
-      if (settled) requestCache.delete(settled[0]);
-      else return res.status(429).json({ error: 'Too many interaction requests are pending.' });
-    }
-    const entry = { fingerprint, expiresAt: now + 300_000, settled: false, promise: null };
+    if (requestCache.size >= MAX_INTERACTIVE_ACTIONS) return res.status(429).json({ error: 'Interactive action id capacity reached for this session.' });
+    const entry = { fingerprint, settled: false, promise: null };
     entry.promise = execute().then(outcome => { entry.settled = true; return outcome; }, () => {
-      requestCache.delete(actionId);
+      entry.settled = true;
       return { status: 502, body: { error: 'Interaction request could not be completed.' } };
     });
     requestCache.set(actionId, entry);

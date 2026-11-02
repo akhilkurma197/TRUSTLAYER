@@ -20,8 +20,9 @@ import { fileURLToPath } from 'node:url';
 import { execFileAsync } from '../async_process.js';
 import { SSRFGuard } from './ssrf_guard.js';
 import { hasVerifiedChromiumSandbox } from './chromium_sandbox_status.js';
-import { validateInteractiveAction, MAX_INTERACTIVE_ACTIONS, MAX_INTERACTIVE_POINTER_MOVES, MAX_INTERACTIVE_VIEWPORT_FRAMES,
+import { validateInteractiveAction, MAX_INTERACTIVE_ACTIONS, MAX_INTERACTIVE_POINTER_MOVES,
   MAX_PENDING_INTERACTIVE_ACTIONS, INTERACTION_TIMEOUT_MS, MAX_SESSION_MS } from '../interactive_action.js';
+import { INTERACTIVE_VIEWPORT_FRAME_WINDOW_MS, MAX_INTERACTIVE_VIEWPORT_FRAMES_PER_MINUTE } from '../interactive_action.js';
 import { validateTestLocalFixturePolicyFromProcess, validateTestLocalFixtureUrl } from './test_local_fixture.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -65,6 +66,30 @@ export function markInteractiveSessionStarted(handle, event, requestedAt = Date.
   handle.sessionStartedAt = requestedAt;
   handle.workerSessionStartedAt = Number.isFinite(event.timestamp) ? event.timestamp : null;
   handle.sessionDeadline = requestedAt + durationMs;
+  return true;
+}
+
+export function armInteractiveSessionSafetyWatchdog(handle, onTimeout, setTimer = setTimeout) {
+  const durationMs = Math.min(MAX_SESSION_MS, Math.max(0, Number(handle?.sessionDurationMs) || 0));
+  if (!handle?.interactive || durationMs <= 0 || typeof onTimeout !== 'function') return null;
+  return setTimer(() => {
+    if (handle.interactiveEnded || !handle.child || handle.child.exitCode !== null) return;
+    handle.interactiveEndReason = 'SUPERVISOR_TIMEOUT';
+    onTimeout();
+  }, durationMs + 60_000);
+}
+
+export function reserveInteractiveViewportFrame(handle, now = Date.now()) {
+  if (!handle || !Number.isFinite(now)) return false;
+  const recent = (Array.isArray(handle.viewportCaptureTimestamps) ? handle.viewportCaptureTimestamps : [])
+    .filter(timestamp => Number.isFinite(timestamp) && timestamp > now - INTERACTIVE_VIEWPORT_FRAME_WINDOW_MS);
+  handle.viewportCaptureTimestamps = recent;
+  handle.viewportCaptureCount = Number.isSafeInteger(handle.viewportCaptureCount) ? handle.viewportCaptureCount : 0;
+  handle.lastViewportCaptureAt = Number.isFinite(handle.lastViewportCaptureAt) ? handle.lastViewportCaptureAt : 0;
+  if (now - handle.lastViewportCaptureAt < 400 || recent.length >= MAX_INTERACTIVE_VIEWPORT_FRAMES_PER_MINUTE) return false;
+  handle.lastViewportCaptureAt = now;
+  handle.viewportCaptureCount++;
+  recent.push(now);
   return true;
 }
 
@@ -497,6 +522,7 @@ export class LiveJobController {
 
     let child;
     let timer;
+    let sessionSafetyTimer;
     let initialScreenshotWatcher;
     let readyResultWatcher;
     let captureStatusWatcher;
@@ -631,6 +657,7 @@ export class LiveJobController {
           if (!isSettled) {
             isSettled = true;
             if (timer) clearTimeout(timer);
+            if (sessionSafetyTimer) clearTimeout(sessionSafetyTimer);
             for (const pending of jobHandle.pendingInteractions.values()) { clearTimeout(pending.timer); pending.resolve({ ok: false, error: 'Interactive browser session stopped.' }); }
             jobHandle.pendingInteractions.clear();
             if (earlyResultPublished && job.result) {
@@ -686,6 +713,8 @@ export class LiveJobController {
                   const started = markInteractiveSessionStarted(jobHandle, event, pendingStart.requestedAt, Date.now());
                   if (started && jobHandle.job?.result) {
                     jobHandle.job.result.runtimeSessionUntil = jobHandle.sessionDeadline;
+                    sessionSafetyTimer = armInteractiveSessionSafetyWatchdog(jobHandle, () => jobHandle.cancel?.());
+                    sessionSafetyTimer.unref?.();
                   }
                   pendingStart.resolve(started ? jobHandle.sessionDeadline : null);
                 }
@@ -781,6 +810,9 @@ export class LiveJobController {
           job.completedAt = Date.now();
           job.durationMs = job.completedAt - job.startedAt;
           earlyResultPublished = true;
+          // Startup/rendering is now complete. The acknowledged interactive
+          // session has a separate finite watchdog tied to its own deadline.
+          if (jobHandle.interactive && timer) { clearTimeout(timer); timer = null; }
           job.cleanupDiagnostics = { status: 'PENDING', operations: [] };
           resolve(job);
           return true;
@@ -794,6 +826,7 @@ export class LiveJobController {
       void publishReadyResult();
 
       child.on('close', async (code) => {
+        if (sessionSafetyTimer) { clearTimeout(sessionSafetyTimer); sessionSafetyTimer = null; }
         jobHandle.workerExitCode = Number.isInteger(code) ? code : null;
         jobHandle.workerSignalCode = typeof child.signalCode === 'string' ? child.signalCode : null;
         jobHandle.workerClosedAt = Date.now();
@@ -968,20 +1001,25 @@ export class LiveJobController {
     handle.pendingActionSlots = Number.isSafeInteger(handle.pendingActionSlots) ? handle.pendingActionSlots : 0;
     if (handle.pendingActionSlots >= MAX_PENDING_INTERACTIVE_ACTIONS) return { ok: false, error: 'Interactive action queue is full; wait for an action to complete.' };
     handle.pendingActionSlots++;
+    const pointerMove = action.type === 'pointer_move';
+    const budgetCount = pointerMove ? 'pointerMoveCount' : 'interactionCount';
+    const budgetPending = pointerMove ? 'pendingPointerMoves' : 'pendingDiscreteActions';
+    handle[budgetCount] = Number.isSafeInteger(handle[budgetCount]) ? handle[budgetCount] : 0;
+    handle[budgetPending] = Number.isSafeInteger(handle[budgetPending]) ? handle[budgetPending] : 0;
+    const budgetLimit = pointerMove ? MAX_INTERACTIVE_POINTER_MOVES : MAX_INTERACTIVE_ACTIONS;
+    if (handle[budgetCount] + handle[budgetPending] >= budgetLimit) {
+      handle.pendingActionSlots--;
+      return { ok: false, error: pointerMove ? 'Pointer movement limit reached.' : 'Interaction limit reached.' };
+    }
+    handle[budgetPending]++;
     let slotReleased = false;
-    const releaseSlot = () => {
+    const releaseSlot = result => {
       if (slotReleased) return;
       slotReleased = true;
       handle.pendingActionSlots = Math.max(0, handle.pendingActionSlots - 1);
+      handle[budgetPending] = Math.max(0, handle[budgetPending] - 1);
+      if (result?.ok) handle[budgetCount]++;
     };
-    if (action.type === 'pointer_move') {
-      handle.pointerMoveCount = Number.isSafeInteger(handle.pointerMoveCount) ? handle.pointerMoveCount : 0;
-      if (handle.pointerMoveCount >= MAX_INTERACTIVE_POINTER_MOVES) { releaseSlot(); return { ok: false, error: 'Pointer movement limit reached.' }; }
-      handle.pointerMoveCount++;
-    } else {
-      if (handle.interactionCount >= MAX_INTERACTIVE_ACTIONS) { releaseSlot(); return { ok: false, error: 'Interaction limit reached.' }; }
-      handle.interactionCount++;
-    }
     if (action.type === 'navigate') {
       let checked;
       try { checked = await this.validateDestination(action.url); }
@@ -991,7 +1029,7 @@ export class LiveJobController {
     }
     const requestId = randomUUID();
     return new Promise(resolve => {
-      const finish = result => { releaseSlot(); resolve(result); };
+      const finish = result => { releaseSlot(result); resolve(result); };
       const timer = setTimeout(() => {
         handle.pendingInteractions.delete(requestId);
         finish({ ok: false, error: 'Interaction timed out; the isolated session was stopped.' });
@@ -1009,14 +1047,9 @@ export class LiveJobController {
         !Number.isFinite(handle.sessionDeadline) || Date.now() >= handle.sessionDeadline) {
       return { ok: false, error: 'Interactive browser session is unavailable.' };
     }
-    const now = Date.now();
-    handle.viewportCaptureCount = Number.isSafeInteger(handle.viewportCaptureCount) ? handle.viewportCaptureCount : 0;
-    handle.lastViewportCaptureAt = Number.isFinite(handle.lastViewportCaptureAt) ? handle.lastViewportCaptureAt : 0;
-    if (now - handle.lastViewportCaptureAt < 400 || handle.viewportCaptureCount >= MAX_INTERACTIVE_VIEWPORT_FRAMES) {
+    if (!reserveInteractiveViewportFrame(handle)) {
       return { ok: false, error: 'Viewport capture is rate limited.' };
     }
-    handle.lastViewportCaptureAt = now;
-    handle.viewportCaptureCount++;
     const requestId = randomUUID();
     return new Promise(resolve => {
       const timer = setTimeout(() => {

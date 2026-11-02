@@ -26,6 +26,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { redactOperationalText } from './log_redaction.js';
+import { DEFAULT_INTERACTIVE_SESSION_MS } from './interactive_action.js';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -727,10 +728,13 @@ Anomalies:         ${qrAnalysis.anomalies.length > 0 ? qrAnalysis.anomalies.join
           const liveRes = await LiveInspector.inspect(parsed.normalizedUrl, {
             caseId: icase.id,
             interactive: isInteractiveSession(icase.schema.interactiveSession),
-            keepAliveMs: isInteractiveSession(icase.schema.interactiveSession) ? 120000 : undefined,
+            keepAliveMs: isInteractiveSession(icase.schema.interactiveSession) ? DEFAULT_INTERACTIVE_SESSION_MS : undefined,
             onInteractiveEvent: (observation) => icase._publishInteractiveObservation?.(observation),
             onInteractiveEnd: (status, detail = {}) => {
               if (icase.schema.interactiveSession) {
+                // Idempotency records are bounded by the per-session action
+                // ceiling and discarded when this worker session terminates.
+                icase._interactiveActionRequests?.clear();
                 icase.schema.interactiveSession.status = status;
                 icase.schema.interactiveSession.endedAt = Date.now();
                 const reason = ['SESSION_LIMIT_REACHED', 'INPUT_CLOSED', 'SUPERVISOR_TIMEOUT', 'SUPERVISOR_START_FAILED', 'OPERATOR_CANCELLED', 'CLEANUP_FAILED', 'WORKER_EXITED'].includes(detail.reason)

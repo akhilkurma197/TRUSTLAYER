@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { hasSensitiveText, isInteractiveSession, isSafePointerTarget, isSafeTextTarget, validateInteractiveAction } from '../core/interactive_action.js';
-import { MAX_INTERACTIVE_POINTER_MOVES } from '../core/interactive_action.js';
+import { hasSensitiveText, isInteractiveSession, isSafePointerTarget, isSafeTextTarget, validateInteractiveAction,
+  MAX_INTERACTIVE_ACTIONS, MAX_INTERACTIVE_POINTER_MOVES } from '../core/interactive_action.js';
 import { LiveJobController, markInteractiveSessionReady, markInteractiveSessionStarted } from '../core/investigators/live_job_controller.js';
 
 test('interactive actions accept only bounded allowlisted parameters', () => {
@@ -40,6 +40,13 @@ test('viewport input policy allows search and standalone text fields but rejects
   assert.equal(isSafeTextTarget({ tagName: 'INPUT', type: 'text', name: 'email' }), false);
   assert.equal(isSafeTextTarget({ tagName: 'INPUT', type: 'text', autocomplete: 'cc-number' }), false);
   assert.equal(isSafeTextTarget({ tagName: 'TEXTAREA', type: '', withinForm: true }), false);
+  assert.equal(isSafePointerTarget({ tagName: 'A', href: 'https://wikipedia.test/article', target: '', label: 'Article' }), true,
+    'ordinary credential-free HTTP(S) self-targeting article links are clickable; the enforced proxy validates destinations');
+  assert.equal(isSafePointerTarget({ tagName: 'A', href: 'javascript:alert(1)', label: 'Article' }), false);
+  assert.equal(isSafePointerTarget({ tagName: 'A', href: 'file:///secret', label: 'Article' }), false);
+  assert.equal(isSafePointerTarget({ tagName: 'A', href: 'https://user:pass@wikipedia.test/article', label: 'Article' }), false);
+  assert.equal(isSafePointerTarget({ tagName: 'A', href: 'https://wikipedia.test/article', target: '_blank', label: 'Article' }), false);
+  assert.equal(isSafePointerTarget({ tagName: 'A', href: 'https://wikipedia.test/download', download: true, label: 'Article' }), false);
   assert.equal(hasSensitiveText('1234 5678 9012 3456'), true);
   assert.equal(hasSensitiveText('safe test query'), false);
 });
@@ -75,8 +82,48 @@ test('controller binds an interaction to its active case and enforces the action
   handle.pointerMoveCount = MAX_INTERACTIVE_POINTER_MOVES - 1;
   assert.equal((await controller.interact(handle.job.caseId, { type: 'pointer_move', x: 5000, y: 5000 })).ok, true);
   assert.match((await controller.interact(handle.job.caseId, { type: 'pointer_move', x: 5000, y: 5000 })).error, /Pointer movement limit/);
-  handle.interactionCount = 20;
+  handle.interactionCount = MAX_INTERACTIVE_ACTIONS;
   assert.match((await controller.interact('TL-2026-1031-1200-ABC', { type: 'back' })).error, /limit/);
+});
+
+test('controller accepts 5000 sequential successful actions and rejects the next action', async () => {
+  assert.ok(MAX_INTERACTIVE_ACTIONS >= 5_000);
+  assert.ok(MAX_INTERACTIVE_POINTER_MOVES >= 5_000);
+  const controller = Object.create(LiveJobController.prototype);
+  const handle = { job: { caseId: 'TL-2026-1102-0900-BUD' }, interactive: true, interactionCount: 0,
+    pendingDiscreteActions: 0, interactiveReady: true, interactiveStarted: true, sessionDeadline: Date.now() + 60_000,
+    pendingInteractions: new Map(), child: { exitCode: null, stdin: { write(line) {
+      const request = JSON.parse(line);
+      queueMicrotask(() => {
+        const pending = handle.pendingInteractions.get(request.requestId);
+        if (pending) { handle.pendingInteractions.delete(request.requestId); clearTimeout(pending.timer); pending.resolve({ requestId: request.requestId, ok: true, action: 'back' }); }
+      });
+    } } } };
+  controller.activeJobs = new Map([['job-budget', handle]]);
+  for (let index = 0; index < MAX_INTERACTIVE_ACTIONS; index++) {
+    const result = await controller.interact(handle.job.caseId, { type: 'back' });
+    assert.equal(result.ok, true, `action ${index + 1} should be accepted`);
+  }
+  assert.equal(handle.interactionCount, 5_000);
+  assert.equal((await controller.interact(handle.job.caseId, { type: 'back' })).error, 'Interaction limit reached.');
+  assert.equal(handle.interactionCount, 5_000, 'the rejected action cannot increase the accepted-action counter');
+});
+
+test('worker-rejected actions release controller budget reservations', async () => {
+  const controller = Object.create(LiveJobController.prototype);
+  const handle = { job: { caseId: 'TL-2026-1102-0900-REJ' }, interactive: true, interactionCount: 0,
+    pendingDiscreteActions: 0, interactiveReady: true, interactiveStarted: true, sessionDeadline: Date.now() + 10_000,
+    pendingInteractions: new Map(), child: { exitCode: null, stdin: { write(line) {
+      const request = JSON.parse(line);
+      queueMicrotask(() => {
+        const pending = handle.pendingInteractions.get(request.requestId);
+        if (pending) { handle.pendingInteractions.delete(request.requestId); clearTimeout(pending.timer); pending.resolve({ requestId: request.requestId, ok: false, error: 'worker rejected' }); }
+      });
+    } } } };
+  controller.activeJobs = new Map([['job-rejected', handle]]);
+  assert.equal((await controller.interact(handle.job.caseId, { type: 'back' })).ok, false);
+  assert.equal(handle.interactionCount, 0);
+  assert.equal(handle.pendingDiscreteActions, 0);
 });
 
 test('viewport capture is case-bound, bounded, and does not consume a user interaction action', async () => {

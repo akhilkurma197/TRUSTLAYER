@@ -10,13 +10,14 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { DEFAULT_INTERACTIVE_SESSION_MS } from '../interactive_action.js';
 import { globalJobController, JOB_STATUS } from './live_job_controller.js';
 import { PageStructureExtractor } from './page_extractor.js';
 
 const BUDGETS = {
   // Leave time for navigation, bounded readiness checks, and screenshot capture.
   timeoutMs: 160000,
-  keepAliveMs: 120000,
+  keepAliveMs: DEFAULT_INTERACTIVE_SESSION_MS,
   maxRedirects: 5,
   maxResponseBytes: 500000
 };

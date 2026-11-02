@@ -1,15 +1,31 @@
 export const INTERACTIVE_ACTIONS = Object.freeze(['navigate', 'back', 'forward', 'reload', 'scroll', 'click', 'type', 'screenshot',
   'pointer_move', 'pointer_click', 'pointer_scroll', 'type_focused', 'key']);
-export const MAX_INTERACTIVE_ACTIONS = 20;
-// At most one pointer update every 500 ms for the fixed 120-second session.
-export const MAX_INTERACTIVE_POINTER_MOVES = 240;
+export const MAX_INTERACTIVE_ACTIONS = 5_000;
+// Pointer movement remains independently bounded from session lifetime.
+export const MAX_INTERACTIVE_POINTER_MOVES = 5_000;
+export const INTERACTION_DISCRETE_BURST = 30;
+export const INTERACTION_DISCRETE_PER_MINUTE = 180;
+export const INTERACTION_POINTER_BURST = 10;
+export const INTERACTION_POINTER_PER_MINUTE = 120;
 export const MAX_PENDING_INTERACTIVE_ACTIONS = 8;
 export const MAX_INTERACTIVE_SCREENSHOTS = 5;
-export const MAX_INTERACTIVE_VIEWPORT_FRAMES = 240;
+export const MAX_INTERACTIVE_VIEWPORT_FRAMES_PER_MINUTE = 120;
+// Retained as a compatibility alias; enforcement is rolling-window based.
+export const MAX_INTERACTIVE_VIEWPORT_FRAMES = MAX_INTERACTIVE_VIEWPORT_FRAMES_PER_MINUTE;
+export const INTERACTIVE_VIEWPORT_FRAME_WINDOW_MS = 60_000;
 export const MAX_INTERACTIVE_VIEWPORT_FRAME_BYTES = 512 * 1024;
 export const MAX_INTERACTION_TEXT = 200;
 export const INTERACTION_TIMEOUT_MS = 5000;
-export const MAX_SESSION_MS = 120_000;
+// Interactive browser lifetime is independent from the per-action timeout.
+// The operator may stop earlier; this finite ceiling bounds abandoned jobs.
+export const MAX_SESSION_MS = 30 * 60_000;
+const configuredSessionLimit = process.env.TRUSTLAYER_INTERACTIVE_SESSION_MAX_MS;
+if (configuredSessionLimit !== undefined &&
+    (!/^\d+$/.test(configuredSessionLimit) || Number(configuredSessionLimit) < 60_000 || Number(configuredSessionLimit) > MAX_SESSION_MS)) {
+  throw new Error(`TRUSTLAYER_INTERACTIVE_SESSION_MAX_MS must be an integer from 60000 to ${MAX_SESSION_MS}.`);
+}
+export const DEFAULT_INTERACTIVE_SESSION_MS = configuredSessionLimit === undefined
+  ? MAX_SESSION_MS : Number(configuredSessionLimit);
 
 export function isInteractiveSession(session) {
   return session?.enabled === true;
@@ -74,6 +90,14 @@ export function isSafePointerTarget(target) {
   const tag = String(target.tagName || '').toLowerCase();
   const type = String(target.type || '').toLowerCase();
   if ((tag === 'input' && ['search', 'text'].includes(type)) || tag === 'textarea') return isSafeTextTarget(target);
+  if (tag === 'a') {
+    if (target.withinForm || target.download || target.contentEditable ||
+        (target.target && String(target.target).toLowerCase() !== '_self') || typeof target.href !== 'string') return false;
+    try {
+      const url = new URL(target.href);
+      return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password;
+    } catch { return false; }
+  }
   if (target.withinForm || target.download || target.contentEditable) return false;
   if (tag === 'button') return (type || 'submit') === 'button';
   return target.role === 'button';

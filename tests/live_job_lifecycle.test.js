@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { JOB_STATUS, LiveJobController, interactiveLifecycleEvidence, markInteractiveSessionReady, markInteractiveSessionStarted } from '../core/investigators/live_job_controller.js';
+import { JOB_STATUS, LiveJobController, armInteractiveSessionSafetyWatchdog, interactiveLifecycleEvidence,
+  markInteractiveSessionReady, markInteractiveSessionStarted, reserveInteractiveViewportFrame } from '../core/investigators/live_job_controller.js';
+import { DEFAULT_INTERACTIVE_SESSION_MS, MAX_SESSION_MS, INTERACTION_TIMEOUT_MS,
+  MAX_INTERACTIVE_VIEWPORT_FRAMES_PER_MINUTE } from '../core/interactive_action.js';
 import { serializeBoundedJson } from '../worker/resource_limits.js';
 
 function ownedDirectory(jobId, token) {
@@ -39,22 +43,24 @@ test('interactive lifecycle evidence remains truthful after active-job cleanup',
   assert.equal(evidence.readyElapsedMs, 120_010);
 });
 
-test('interactive deadline starts only after supervisor start acknowledgement', () => {
-  const handle = { interactive: true, sessionDurationMs: 120_000 };
+test('interactive deadline starts only after supervisor acknowledgement and exceeds the prior two-minute expiry', () => {
+  const handle = { interactive: true, sessionDurationMs: DEFAULT_INTERACTIVE_SESSION_MS };
+  const startCommandAt = 20_000;
   assert.equal(markInteractiveSessionReady(handle, { type: 'navigation_completed', timestamp: 9_990 }, 10_000), true);
   assert.equal(handle.sessionDeadline, undefined, 'navigation readiness alone must not consume user interaction time');
   assert.equal(markInteractiveSessionStarted(handle, { type: 'interactive_session_started', timestamp: 20_005 }, 20_000, 20_010), true);
   assert.equal(handle.sessionStartedAt, 20_000);
   assert.equal(handle.startCommandSentAt, 20_000);
   assert.equal(handle.startAcknowledgementReceivedAt, 20_010);
-  assert.equal(handle.sessionDeadline, 140_000);
+  assert.equal(handle.sessionDeadline, startCommandAt + MAX_SESSION_MS);
   assert.equal(markInteractiveSessionStarted(handle, { type: 'interactive_session_started' }, 30_000), false,
     'duplicate start acknowledgements must not extend the finite deadline');
-  const evidence = interactiveLifecycleEvidence(handle, 20_100);
+  const evidence = interactiveLifecycleEvidence(handle, startCommandAt + 120_001);
   assert.equal(evidence.readyEventReceived, true);
   assert.equal(evidence.startAcknowledgementElapsedMs, 10);
-  assert.equal(evidence.sessionElapsedMs, 100);
-  assert.equal(evidence.deadlineElapsedMs, -119_900);
+  assert.equal(evidence.sessionElapsedMs, 120_001);
+  assert.equal(evidence.deadlineElapsedMs, 120_001 - MAX_SESSION_MS);
+  assert.equal(INTERACTION_TIMEOUT_MS, 5_000, 'per-action timeout is unchanged');
 
   const workerSource = fs.readFileSync(new URL('../worker/browser_worker.js', import.meta.url), 'utf8');
   const sessionStart = workerSource.indexOf('async function runInteractiveSession');
@@ -65,6 +71,61 @@ test('interactive deadline starts only after supervisor start acknowledgement', 
   assert.ok(sessionStart >= 0 && navigationReady > sessionStart && startCommand > navigationReady &&
     workerDeadline > startCommand && workerTimer > workerDeadline,
   'worker must wait for the supervisor start command before beginning its finite timer');
+  assert.match(workerSource, /Math\.min\(keepAliveMs, MAX_SESSION_MS\)/,
+    'worker command-line parsing must accept the shared finite session ceiling');
+});
+
+test('interactive session hard limit is configurable downward but never above its fixed ceiling', () => {
+  const source = "import { MAX_SESSION_MS, DEFAULT_INTERACTIVE_SESSION_MS } from './core/interactive_action.js'; process.stdout.write(`${MAX_SESSION_MS}:${DEFAULT_INTERACTIVE_SESSION_MS}`);";
+  const configured = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+    cwd: process.cwd(), encoding: 'utf8',
+    env: { ...process.env, TRUSTLAYER_INTERACTIVE_SESSION_MAX_MS: '60000' }
+  });
+  assert.equal(configured.status, 0, configured.stderr);
+  assert.equal(configured.stdout, `${MAX_SESSION_MS}:60000`);
+  const invalid = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+    cwd: process.cwd(), encoding: 'utf8',
+    env: { ...process.env, TRUSTLAYER_INTERACTIVE_SESSION_MAX_MS: String(MAX_SESSION_MS + 1) }
+  });
+  assert.notEqual(invalid.status, 0, 'unsafe values above the fixed ceiling must fail closed');
+});
+
+test('supervisor watchdog is independent, finite, and distinguishes an already exited worker', () => {
+  let scheduled;
+  let cancellations = 0;
+  const handle = { interactive: true, sessionDurationMs: DEFAULT_INTERACTIVE_SESSION_MS,
+    child: { exitCode: null }, interactiveEnded: false };
+  const timer = armInteractiveSessionSafetyWatchdog(handle, () => { cancellations++; }, (callback, delay) => {
+    scheduled = { callback, delay, unref() {} };
+    return scheduled;
+  });
+  assert.equal(timer, scheduled);
+  assert.equal(scheduled.delay, MAX_SESSION_MS + 60_000,
+    'the supervisor backstop allows the worker its full session plus a bounded graceful-exit window');
+  scheduled.callback();
+  assert.equal(handle.interactiveEndReason, 'SUPERVISOR_TIMEOUT');
+  assert.equal(cancellations, 1);
+
+  const exited = { interactive: true, sessionDurationMs: 60_000, child: { exitCode: 0 }, interactiveEnded: false };
+  const exitedTimer = armInteractiveSessionSafetyWatchdog(exited, () => { throw new Error('must not terminate an exited worker'); },
+    callback => callback);
+  exitedTimer();
+  assert.equal(exited.interactiveEndReason, undefined);
+});
+
+test('viewport refresh budget rolls over so a healthy long session does not disconnect after two minutes', () => {
+  const handle = { viewportCaptureCount: 0, lastViewportCaptureAt: 0, viewportCaptureTimestamps: [] };
+  for (let index = 0; index < MAX_INTERACTIVE_VIEWPORT_FRAMES_PER_MINUTE; index++) {
+    assert.equal(reserveInteractiveViewportFrame(handle, 1_000 + index * 500), true);
+  }
+  assert.equal(handle.viewportCaptureCount, 120);
+  assert.equal(reserveInteractiveViewportFrame(handle, 61_000), true,
+    'expired frame timestamps free rolling-window capacity without changing the 2 fps pace');
+
+  const saturated = { viewportCaptureCount: 120, lastViewportCaptureAt: 60_500,
+    viewportCaptureTimestamps: Array.from({ length: 120 }, (_, index) => 1_000 + index * 500) };
+  assert.equal(reserveInteractiveViewportFrame(saturated, 60_500), false,
+    'a full rolling minute still enforces the per-session capture bound');
 });
 
 test('startup failure cleanup reports errors and still removes owned output', async () => {

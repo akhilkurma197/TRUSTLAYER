@@ -2144,7 +2144,15 @@ function renderInteractivePanel(schema) {
       : (status === 'STARTING'
         ? 'Starting isolated Chromium. Controls unlock only after sandbox verification and the worker start handshake.'
         : (['ENDED', 'CANCELLED', 'FAILED', 'COMPLETED'].includes(status)
-          ? `Interactive session ${status.toLowerCase()}; controls are disabled. Create a new interactive case to start another session.`
+          ? (session.endedReason === 'SESSION_LIMIT_REACHED'
+            ? 'The configured maximum interactive session duration was reached; the isolated browser was closed. Create a new interactive case to continue.'
+            : session.endedReason === 'SUPERVISOR_TIMEOUT'
+              ? 'The supervisor safety watchdog stopped the interactive browser because it did not exit within its allowed cleanup window.'
+              : session.endedReason === 'CLEANUP_FAILED'
+                ? 'The interactive browser ended, but required cleanup reported a failure. Review the case cleanup status before starting another session.'
+                : session.endedReason === 'OPERATOR_CANCELLED'
+                  ? 'You stopped the interactive session; its browser resources are being cleaned up.'
+                  : `Interactive session ${status.toLowerCase()}; controls are disabled. Create a new interactive case to start another session.`)
           : `Interactive session status: ${status}. Controls remain disabled until the worker is confirmed ready.`));
   }
   for (const id of ['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel']) document.getElementById(id).disabled = !running;

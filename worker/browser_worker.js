@@ -44,7 +44,7 @@ const outputPath = args.output;
 const screenshotPath = args.screenshot;
 const initialScreenshotPath = args.initialScreenshot;
 const timeoutMs = parseInt(args.timeout || '25000', 10);
-const keepAliveMs = Math.min(150000, Math.max(0, parseInt(args.keepAlive || '120000', 10)));
+const keepAliveMs = Math.min(MAX_SESSION_MS, Math.max(0, parseInt(args.keepAlive || '0', 10)));
 const interactive = args.interactive === '1';
 const handoffGraceMs = Math.min(5000, Math.max(0, parseInt(args.handoffGrace || '0', 10)));
 const requestedCaptureDelayMs = Number.parseInt(args.captureDelayMs || '10000', 10);
@@ -790,10 +790,9 @@ async function runInteractiveSession(page, context, durationMs) {
         (pointerMove && pointerMoveCount >= MAX_INTERACTIVE_POINTER_MOVES) || (action?.type === 'screenshot' && screenshotCount >= MAX_INTERACTIVE_SCREENSHOTS) || Date.now() >= endsAt) {
       process.stdout.write(`TL_RESPONSE:${JSON.stringify({ requestId, ok: false, error: 'Action rejected by session policy.' })}\n`); return;
     }
-    if (pointerMove) pointerMoveCount++;
-    else count++;
     if (!pointerMove) emit('action_started', `Investigator requested ${action.type}.`);
     let response = { requestId, ok: true, action: action.type, url: redactSensitiveUrl(page.url()) };
+    let pointerLinkClick = false;
     try {
       const timeout = { timeout: INTERACTION_TIMEOUT_MS };
       if (action.type === 'navigate') await page.goto(action.url, { ...timeout, waitUntil: 'domcontentloaded' });
@@ -812,17 +811,18 @@ async function runInteractiveSession(page, context, durationMs) {
         } else {
           const target = await page.evaluate(({ x, y }) => {
             const hit = document.elementFromPoint(x, y);
-            const el = hit?.closest('button,[role="button"],input[type="search"],input[type="text"],textarea') || hit;
+            const el = hit?.closest('a[href],button,[role="button"],input[type="search"],input[type="text"],textarea') || hit;
             if (!el || !el.isConnected || !el.getClientRects().length) return null;
             return { tagName: el.tagName, type: el.getAttribute('type') || '', name: el.getAttribute('name') || '',
               id: el.id || '', autocomplete: el.getAttribute('autocomplete') || '', ariaLabel: el.getAttribute('aria-label') || '',
               label: el.innerText || '', role: el.getAttribute('role') || '', withinForm: Boolean(el.closest('form')),
               formMethod: el.closest('form')?.method || '',
               disabled: Boolean(el.disabled), readOnly: Boolean(el.readOnly), download: el.hasAttribute('download'),
-              contentEditable: el.getAttribute('contenteditable') === 'true' };
+              contentEditable: el.getAttribute('contenteditable') === 'true', href: el.href || '', target: el.getAttribute('target') || '' };
           }, { x, y });
           const safe = isSafePointerTarget(target);
           if (!safe) throw new Error('The selected viewport target is not permitted.');
+          pointerLinkClick = target.tagName === 'A';
           await page.mouse.click(x, y);
         }
       }
@@ -880,15 +880,19 @@ async function runInteractiveSession(page, context, durationMs) {
       if (pointerMove) {
         if (pointerMoveCount % 20 === 0) emit('pointer_position_sampled', 'Coalesced pointer position updated.');
       } else {
-        const pageState = await page.evaluate(() => ({ titleLength: document.title.length,
+        const pageState = pointerLinkClick ? null : await page.evaluate(() => ({ titleLength: document.title.length,
           visibleTextLength: document.body?.innerText?.length || 0, formCount: document.forms.length,
           inputTypes: [...document.querySelectorAll('input')].slice(0, 32).map(input => input.type || 'text') }));
-        emit('dom_change', `Page state metadata: ${JSON.stringify(pageState).slice(0, 400)}.`);
+        if (pageState) emit('dom_change', `Page state metadata: ${JSON.stringify(pageState).slice(0, 400)}.`);
         emit('action_completed', `Investigator ${action.type} action completed.`);
       }
     } catch (error) {
       response = { requestId, ok: false, error: 'Action could not be completed under browser policy.' };
       if (!pointerMove) emit('action_failed', `Investigator ${action.type} action failed.`);
+    }
+    if (response.ok) {
+      if (pointerMove) pointerMoveCount++;
+      else count++;
     }
     process.stdout.write(`TL_RESPONSE:${JSON.stringify(response)}\n`);
   };

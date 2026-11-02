@@ -176,6 +176,12 @@ test('frontend closes its EventSource only after an accepted terminal case schem
     'cancel-live must publish the terminal session state before the frontend closes its stream');
 });
 
+test('interactive UI reports hard session expiry and supervisor watchdog distinctly from operator cancellation', () => {
+  assert.match(consoleHtml, /configured maximum interactive session duration was reached/);
+  assert.match(consoleHtml, /supervisor safety watchdog stopped the interactive browser/);
+  assert.match(consoleHtml, /You stopped the interactive session/);
+});
+
 test('Docker fixture test performs the first browser action before bounded container diagnostics', () => {
   const firstTypingAction = fixtureTest.indexOf("label: 'typing interaction'");
   const containerInspection = fixtureTest.indexOf("['inspect', firstHandle.browserContainerName, firstHandle.egressContainerName], 10_000");
