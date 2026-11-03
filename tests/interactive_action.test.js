@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { hasSensitiveText, isInteractiveSession, isSafePointerTarget, isSafeTextTarget, validateInteractiveAction,
+import { hasSensitiveText, isInteractiveSession, isSafeKeyboardTarget, isSafePointerTarget, isSafeTextTarget, validateInteractiveAction,
   MAX_INTERACTIVE_ACTIONS, MAX_INTERACTIVE_POINTER_MOVES } from '../core/interactive_action.js';
 import { LiveJobController, markInteractiveSessionReady, markInteractiveSessionStarted } from '../core/investigators/live_job_controller.js';
 
@@ -11,7 +11,8 @@ test('interactive actions accept only bounded allowlisted parameters', () => {
     { type: 'navigate', url: 'https://example.invalid/path' }, { type: 'screenshot' },
     { type: 'pointer_move', x: 5000, y: 5000 }, { type: 'pointer_click', x: 5000, y: 5000 },
     { type: 'pointer_scroll', x: 0, y: 10000, direction: 'down', pixels: 800 },
-    { type: 'type_focused', text: 'harmless local query' }, { type: 'key', key: 'Enter' }
+    { type: 'type_focused', text: 'harmless local query' }, { type: 'key', key: 'Enter' },
+    { type: 'key', key: 'Space' }, { type: 'key', key: 'Home' }, { type: 'key', key: 'PageDown' }
   ]) assert.equal(validateInteractiveAction(action).valid, true, JSON.stringify(action));
   for (const action of [null, {}, { type: 'evaluate', expression: 'alert(1)' },
     { type: 'reload', extra: true }, { type: 'navigate', url: 'https://user:pass@example.invalid/' },
@@ -49,6 +50,30 @@ test('viewport input policy allows search and standalone text fields but rejects
   assert.equal(isSafePointerTarget({ tagName: 'A', href: 'https://wikipedia.test/download', download: true, label: 'Article' }), false);
   assert.equal(hasSensitiveText('1234 5678 9012 3456'), true);
   assert.equal(hasSensitiveText('safe test query'), false);
+});
+
+test('pointer and keyboard policy permits ordinary native/custom controls but blocks consequential targets', () => {
+  for (const target of [
+    { tagName: 'INPUT', type: 'checkbox', name: 'updates' },
+    { tagName: 'INPUT', type: 'radio', name: 'region' },
+    { tagName: 'SELECT', name: 'category' },
+    { tagName: 'SUMMARY', label: 'More details' },
+    { tagName: 'BUTTON', type: 'button', role: 'tab', label: 'Overview' }
+  ]) assert.equal(isSafePointerTarget(target), true, `${target.tagName}/${target.type || target.role || ''} should be operable`);
+  assert.equal(isSafePointerTarget({ tagName: 'INPUT', type: 'checkbox', name: 'consent' }), false);
+  assert.equal(isSafePointerTarget({ tagName: 'SELECT', name: 'payment_method' }), false);
+  assert.equal(isSafePointerTarget({ tagName: 'SELECT', name: 'category', withinForm: true, formMethod: 'post' }), false);
+  assert.equal(isSafePointerTarget({ tagName: 'BUTTON', type: 'button', disabled: true }), false);
+  assert.equal(isSafePointerTarget({ tagName: 'BUTTON', type: 'button', ariaDisabled: true }), false);
+
+  assert.equal(isSafeKeyboardTarget({ tagName: 'INPUT', type: 'checkbox', name: 'updates' }, 'Space'), true);
+  assert.equal(isSafeKeyboardTarget({ tagName: 'INPUT', type: 'radio', name: 'region' }, 'ArrowDown'), true);
+  assert.equal(isSafeKeyboardTarget({ tagName: 'SELECT', name: 'category' }, 'Enter'), true);
+  assert.equal(isSafeKeyboardTarget({ tagName: 'BUTTON', type: 'button', role: 'tab' }, 'ArrowRight'), true);
+  assert.equal(isSafeKeyboardTarget({ tagName: 'A', href: 'https://fixture.test/article' }, 'Enter'), true);
+  assert.equal(isSafeKeyboardTarget({ tagName: 'INPUT', type: 'password', name: 'password' }, 'Enter'), false);
+  assert.equal(isSafeKeyboardTarget({ tagName: 'BUTTON', type: 'submit', withinForm: true }, 'Enter'), false);
+  assert.equal(isSafeKeyboardTarget({ tagName: 'BODY' }, 'Tab'), true);
 });
 
 test('interactive case state enables the isolated worker protocol only when explicitly enabled', () => {

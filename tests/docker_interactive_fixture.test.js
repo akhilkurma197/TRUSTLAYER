@@ -21,7 +21,7 @@ import { readDisplayedViewportFrame } from './helpers/displayed_viewport_frame.j
 import { hasVisibleTextChangeAfter, latestVisibleTextState } from './helpers/fixture_dom_change.js';
 import { fixtureCredentialMarker, summarizeFixtureCredentialObservations } from './helpers/fixture_credential_marker.js';
 import { isExpectedCancelledEventStreamAbort } from './helpers/expected_sse_abort.js';
-import { classifyConsoleError, isExpectedCaseCreationAuthChallenge } from './helpers/console_error_classification.js';
+import { classifyConsoleError, isExpectedCaseCreationAuthChallenge, isExpectedUnsafeInteractiveRejection } from './helpers/console_error_classification.js';
 import { DNSReconInvestigator } from '../core/investigators/dns_recon.js';
 
 const enabled = process.env.TRUSTLAYER_DOCKER_INTERACTIVE_FIXTURE === '1';
@@ -146,12 +146,22 @@ function printRuntimeFailureDiagnostics({ caseId, status, error, browserContaine
 
 function fixtureScript() {
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Trust Layer Local Fixture</title><style>
-body{margin:0}#state{position:fixed;left:50px;top:50px}#change{position:fixed;left:50px;top:100px}#note{position:fixed;left:50px;top:160px}
+body{margin:0;min-height:1800px}#state{position:fixed;left:50px;top:40px}#change{position:fixed;left:50px;top:100px}#note{position:fixed;left:50px;top:160px}
+#updates-label{position:fixed;left:50px;top:220px}#region-north-label{position:fixed;left:50px;top:260px}#region-south-label{position:fixed;left:150px;top:260px}#choice-label{position:fixed;left:50px;top:300px}#choice{position:fixed;left:50px;top:325px}
+#disclosure{position:fixed;left:50px;top:380px}#tab-one{position:fixed;left:50px;top:455px}#tab-two{position:fixed;left:150px;top:455px}#tab-state{position:fixed;left:50px;top:500px}
+#same-page-link{position:fixed;left:50px;top:550px}#fixture-two-link{position:fixed;left:50px;top:585px}#unsafe-link{position:fixed;left:50px;top:620px}
 </style></head>
 <body><h1>Local interactive fixture</h1><p id="state">State: ready</p>
 <button id="change" type="button" onclick="document.getElementById('state').textContent='State: changed for local test';">Change state</button>
-<label for="note">Local note</label><input id="note" type="text" autocomplete="off" oninput="document.getElementById('state').textContent='State: text entered for local test';"></body></html>`;
-  return `const http=require('node:http');const html=${JSON.stringify(html)};const credentialMarker=${fixtureCredentialMarker.toString()};http.createServer((req,res)=>{console.log(credentialMarker(req.headers));if(req.method!=='GET'){res.writeHead(405);return res.end()}res.writeHead(200,{'content-type':'text/html; charset=utf-8','content-length':Buffer.byteLength(html),'cache-control':'no-store'});res.end(html)}).listen(${fixturePort},'0.0.0.0',()=>console.log('TRUSTLAYER_FIXTURE_READY'))`;
+<label for="note">Local note</label><input id="note" type="text" autocomplete="off" oninput="document.getElementById('state').textContent='State: text entered for local test';">
+<label id="updates-label"><input id="updates" type="checkbox" name="updates"> Receive local updates</label>
+<label id="region-north-label"><input id="region-north" type="radio" name="region" value="north"> North</label><label id="region-south-label"><input id="region-south" type="radio" name="region" value="south"> South</label>
+<label id="choice-label" for="choice">Local choice</label><select id="choice" name="choice" aria-label="Local choice" onchange="document.getElementById('state').textContent='State: choice '+this.value"><option value="one">One</option><option value="two">Two</option></select>
+<details id="disclosure"><summary>Expand local details</summary><p>Expanded fixture details</p></details>
+<div role="tablist" aria-label="Local fixture tabs"><button id="tab-one" type="button" role="tab" aria-selected="true" tabindex="0" onclick="document.getElementById('tab-state').textContent='Tab one selected'" onkeydown="if(event.key==='ArrowRight'){document.getElementById('tab-state').textContent='Tab two selected';document.getElementById('tab-two').focus()}">Tab one</button><button id="tab-two" type="button" role="tab" aria-selected="false" tabindex="-1" onclick="document.getElementById('tab-state').textContent='Tab two selected'">Tab two</button></div><p id="tab-state">Tab one selected</p>
+<a id="same-page-link" href="#same-page-target">Same-page fixture link</a><a id="fixture-two-link" href="/fixture-two">Second fixture page</a><a id="unsafe-link" href="javascript:document.title='blocked'">Unsafe fixture link</a><p id="same-page-target" style="position:fixed;left:50px;top:660px">Same-page target</p></body></html>`;
+  const secondPage = '<!doctype html><html><head><title>Trust Layer Fixture Page Two</title></head><body><h1 id="second-page-state">Second local fixture page</h1><a href="/">Return to fixture</a></body></html>';
+  return `const http=require('node:http');const html=${JSON.stringify(html)};const secondPage=${JSON.stringify(secondPage)};const credentialMarker=${fixtureCredentialMarker.toString()};http.createServer((req,res)=>{console.log(credentialMarker(req.headers));if(req.method!=='GET'){res.writeHead(405);return res.end()}const body=req.url==='/fixture-two'?secondPage:html;res.writeHead(200,{'content-type':'text/html; charset=utf-8','content-length':Buffer.byteLength(body),'cache-control':'no-store'});res.end(body)}).listen(${fixturePort},'0.0.0.0',()=>console.log('TRUSTLAYER_FIXTURE_READY'))`;
 }
 
 async function waitFor(predicate, label, timeoutMs = 90_000) {
@@ -1213,6 +1223,88 @@ test('opt-in Playwright UI workflow through the local Mode C fixture, supervisor
     }, 'viewport frame reflecting isolated keyboard input', 10_000);
     assert.notEqual(textViewportHash, changedViewportHash);
 
+    let lastControlFrameHash = textViewportHash;
+    const clickFixtureControl = async (cssPoint, expectedKind, label) => {
+      const metrics = await liveViewport.evaluate(image => {
+        const rect = image.getBoundingClientRect();
+        return { box: { width: rect.width, height: rect.height }, viewport: { width: image.naturalWidth, height: image.naturalHeight } };
+      });
+      const point = viewportFixtureCssPosition(metrics.box, cssPoint, metrics.viewport);
+      const responsePromise = sendViewportAction('pointer_click');
+      await liveViewport.click({ position: point, timeout: 5_000 });
+      const response = await responsePromise;
+      const body = await response.json();
+      assert.equal(response.status(), 200, `${label} pointer action should succeed (HTTP ${response.status()}, ${body.errorCode || 'no error code'})`);
+      assert.equal(body.targetKind, expectedKind, `${label} should be identified as a real ${expectedKind} control`);
+      return body;
+    };
+    const pressFixtureKey = async (key, expectedKind) => {
+      const responsePromise = sendViewportAction('key');
+      await uiPage.locator('#interactive-viewport-shell').focus();
+      await uiPage.keyboard.press(key);
+      const response = await responsePromise;
+      const body = await response.json();
+      assert.equal(response.status(), 200, `${key} key action should succeed (HTTP ${response.status()}, ${body.errorCode || 'no error code'})`);
+      if (expectedKind) assert.equal(body.targetKind, expectedKind);
+      return body;
+    };
+    const waitForControlFrame = async label => {
+      const nextHash = await waitFor(async () => {
+        const frame = await readDisplayedViewportFrame(liveViewport);
+        return frame?.sha256 && frame.sha256 !== lastControlFrameHash ? frame.sha256 : null;
+      }, label, 10_000);
+      lastControlFrameHash = nextHash;
+      return nextHash;
+    };
+
+    await clickFixtureControl({ x: 90, y: 230 }, 'checkbox', 'checkbox');
+    await waitForControlFrame('frame showing the real checkbox state change');
+    await pressFixtureKey('Space', 'checkbox');
+    await waitForControlFrame('frame showing keyboard checkbox activation');
+    await clickFixtureControl({ x: 170, y: 270 }, 'radio', 'radio option');
+    await waitForControlFrame('frame showing radio selection');
+    await clickFixtureControl({ x: 90, y: 337 }, 'select', 'native select');
+    await pressFixtureKey('ArrowDown', 'select');
+    await pressFixtureKey('Enter', 'select');
+    await waitForControlFrame('frame showing the selected native option');
+    await clickFixtureControl({ x: 115, y: 395 }, 'disclosure', 'expandable summary');
+    await waitForControlFrame('frame showing expanded details');
+    await clickFixtureControl({ x: 80, y: 468 }, 'tab', 'custom tab');
+    await pressFixtureKey('ArrowRight', 'tab');
+    await waitForControlFrame('frame showing keyboard tab activation');
+    const samePageLink = await clickFixtureControl({ x: 145, y: 560 }, 'link', 'same-page hyperlink');
+    assert.equal(samePageLink.navigationChanged, true,
+      'the worker must report the real URL change without exposing a potentially sensitive fragment');
+    const blockedLinkResponsePromise = sendViewportAction('pointer_click');
+    await liveViewport.click({ position: viewportFixtureCssPosition(
+      (await liveViewport.boundingBox()), { x: 100, y: 630 }, { width: 1280, height: 800 }), timeout: 5_000 });
+    const blockedLinkResponse = await blockedLinkResponsePromise;
+    const blockedLinkBody = await blockedLinkResponse.json();
+    assert.equal(blockedLinkResponse.status(), 409, 'unsafe-scheme fixture link must remain blocked');
+    assert.equal(blockedLinkBody.errorCode, 'TARGET_NOT_PERMITTED');
+    const blockedLinkConsoleRejectionEvidence = {
+      caseId: first.caseId, phase: workflowPhase, responseStatus: blockedLinkResponse.status(), errorCode: blockedLinkBody.errorCode
+    };
+    const secondPageLink = await clickFixtureControl({ x: 140, y: 595 }, 'link', 'second local hyperlink');
+    const secondPageUrl = new URL(secondPageLink.url);
+    assert.equal(secondPageLink.navigationChanged, true,
+      `ordinary same-tab fixture navigation must be observed (path=${secondPageUrl.pathname}, pathType=${typeof secondPageUrl.pathname}, targetKind=${secondPageLink.targetKind || 'missing'})`);
+    assert.equal(secondPageUrl.pathname, '/[path-redacted]',
+      `API URL reporting must preserve path redaction (observedPath=${secondPageUrl.pathname}, navigationChanged=${secondPageLink.navigationChanged === true})`);
+    await waitForControlFrame('viewport frame from the second same-tab fixture page');
+    const runFallbackNavigation = async (name, actionType) => {
+      const responsePromise = sendViewportAction(actionType);
+      await uiPage.locator(`#interactive-${name}`).click();
+      const response = await responsePromise;
+      assert.equal(response.status(), 200, `${name} should use the existing worker navigation action`);
+      return response;
+    };
+    await runFallbackNavigation('back', 'back');
+    await runFallbackNavigation('forward', 'forward');
+    await runFallbackNavigation('back', 'back');
+    await runFallbackNavigation('back', 'back');
+    await runFallbackNavigation('reload', 'reload');
+
     await uiPage.locator('#interactive-selector').fill('#change');
     const clickResponse = await clickForApiResponse({ page: uiPage, button: uiPage.locator('#interactive-click'), caseId: first.caseId,
       base, pathname: `/api/cases/${first.caseId}/interactions`, appRequests, appResponses,
@@ -1411,10 +1503,15 @@ test('opt-in Playwright UI workflow through the local Mode C fixture, supervisor
       allApplication401ResponseCount,
       authSessionEstablished: authSession204Count === 1 && authenticatedCaseCreation201Count === 1
     }));
-    const unexpectedConsoleErrors = browserConsoleErrors.filter(error => !expectedAuthChallengeErrors.includes(error));
     assert.ok(expectedAuthChallengeErrors.length <= 1, 'only one browser console error may correspond to the single initial authentication challenge');
+    const expectedUnsafeRejectionErrors = browserConsoleErrors.filter(error =>
+      isExpectedUnsafeInteractiveRejection(error, blockedLinkConsoleRejectionEvidence));
+    assert.ok(expectedUnsafeRejectionErrors.length <= 1,
+      'only one console error may correspond to the explicitly asserted unsafe-link rejection');
+    const expectedConsoleErrors = [...expectedAuthChallengeErrors, ...expectedUnsafeRejectionErrors];
+    const unexpectedConsoleErrors = browserConsoleErrors.filter(error => !expectedConsoleErrors.includes(error));
     assert.deepEqual(unexpectedConsoleErrors, [],
-      `frontend console errors must not occur except for the verified initial case-creation authentication challenge; safe 401 response metadata: ${JSON.stringify(safeUnexpected401Responses)}`);
+      `frontend console errors must not occur except for the verified initial case-creation challenge or exact unsafe-link rejection; safe 401 response metadata: ${JSON.stringify(safeUnexpected401Responses)}`);
     assert.deepEqual(browserDialogs, [], 'loopback local-session authentication must not prompt for an API token');
     assert.equal(appResponses.some(item => item.status >= 500), false, 'frontend API responses must not contain server errors');
     assert.equal(appResponses.some(item => item.status === 401 && !(item.method === 'POST' && new URL(item.url).pathname === '/api/cases')), false,

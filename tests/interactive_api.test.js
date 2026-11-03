@@ -47,13 +47,17 @@ test('interactive endpoints require authentication and enforce case/action bound
     assert.equal((await fetch(`${base}/api/cases/${id}/interactions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 401);
     assert.equal((await fetch(`${base}/api/cases/${id}/interactions`, { method: 'POST', headers, body: JSON.stringify({ action: { type: 'evaluate', expression: '1' } }) })).status, 404, 'operator authentication alone must not grant case access');
     assert.equal((await fetch(`${base}/api/cases/${id}/interactions`, { method: 'POST', headers: caseHeaders(otherId), body: JSON.stringify({ action: { type: 'back' } }) })).status, 404, 'another case credential must not authorize this case');
-    assert.equal((await fetch(`${base}/api/cases/${id}/interactions`, { method: 'POST', headers: caseHeaders(id), body: JSON.stringify({ action: { type: 'evaluate', expression: '1' } }) })).status, 400);
+    const invalidAction = await fetch(`${base}/api/cases/${id}/interactions`, { method: 'POST', headers: caseHeaders(id), body: JSON.stringify({ action: { type: 'evaluate', expression: '1' } }) });
+    assert.equal(invalidAction.status, 400);
+    assert.equal((await invalidAction.json()).errorCode, 'INVALID_ACTION');
     assert.equal((await fetch(`${base}/api/cases/${id}/interactions`, { method: 'POST', headers: caseHeaders(id), body: JSON.stringify({ action: { type: 'back' } }) })).status, 409, 'authorized case without worker must fail closed');
     const viewportAction = await fetch(`${base}/api/cases/${id}/interactions`, { method: 'POST', headers: caseHeaders(id),
       body: JSON.stringify({ action: { type: 'pointer_click', x: 5000, y: 5000 } }) });
     assert.equal(viewportAction.status, 409,
       'a valid coordinate action passes schema validation and then fails closed because this test has no worker');
-    assert.equal((await viewportAction.json()).error, 'Interactive browser session is unavailable.');
+    const unavailableBody = await viewportAction.json();
+    assert.equal(unavailableBody.error, 'Interactive browser session is unavailable.');
+    assert.equal(unavailableBody.errorCode, 'SESSION_UNAVAILABLE');
     assert.equal((await fetch(`${base}/api/cases/${id}/interactive-artifacts/${'a'.repeat(32)}`, { headers: caseHeaders(id) })).status, 404);
     assert.equal((await fetch(`${base}/api/cases/${id}/interactive-artifacts/${'a'.repeat(32)}`)).status, 401);
     assert.equal((await fetch(`${base}/api/cases/${id}/interactive-viewport`, { headers })).status, 404,
@@ -80,7 +84,9 @@ test('pointer traffic has an independent bounded burst; discrete actions stay av
   const previousInteract = globalJobController.interact;
   globalJobController.interact = async (caseId, action) => {
     calls.push({ caseId, type: action.type });
-    return { ok: true, action: action.type, url: 'http://fixture.invalid/' };
+    if (action.selector === '#unsafe') return { ok: false, error: 'The selected control is not permitted.', errorCode: 'TARGET_NOT_PERMITTED' };
+    return { ok: true, action: action.type, url: 'http://fixture.invalid/',
+      ...(action.type === 'pointer_click' ? { targetKind: 'checkbox' } : {}) };
   };
   const server = createApp({ apiToken: token, cases: new Map([[id, icase]]) }).listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
@@ -101,6 +107,12 @@ test('pointer traffic has an independent bounded burst; discrete actions stay av
       { type: 'type', selector: '#note', text: 'harmless text' },
       { type: 'pointer_scroll', x: 5000, y: 5000, direction: 'down', pixels: 100 }
     ]) assert.equal((await submit(action)).status, 200, `${action.type} remains available after pointer movement`);
+    const pointerClick = await submit({ type: 'pointer_click', x: 100, y: 200 });
+    assert.equal(pointerClick.status, 200);
+    assert.equal((await pointerClick.json()).targetKind, 'checkbox', 'worker target category reaches the UI response');
+    const unsafe = await submit({ type: 'click', selector: '#unsafe' });
+    assert.equal(unsafe.status, 409);
+    assert.equal((await unsafe.json()).errorCode, 'TARGET_NOT_PERMITTED', 'the safe failure category survives the API boundary');
     assert.equal(calls.filter(call => call.type === 'pointer_move').length, INTERACTION_POINTER_BURST);
 
     const repeatedId = randomBytes(16).toString('hex');
@@ -115,7 +127,7 @@ test('pointer traffic has an independent bounded burst; discrete actions stay av
     assert.equal((await submit({ type: 'scroll', direction: 'down', pixels: 50 }, repeatedId)).status, 409,
       'an action ID cannot be reused for a different action');
 
-    for (let index = 0; index < 26; index++) {
+    for (let index = 0; index < 24; index++) {
       assert.equal((await submit({ type: 'back' })).status, 200);
     }
     assert.equal((await submit({ type: 'back' })).status, 429,

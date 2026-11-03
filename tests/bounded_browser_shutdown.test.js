@@ -192,10 +192,33 @@ test('bounded browser shutdown reports the exact tracked PID state when terminat
     assert.equal(error.outcome.directProcessTerminationStatus, 'PROCESS_KILL_RETURNED_FALSE');
     assert.equal(error.outcome.processExitConfirmed, false);
     assert.deepEqual(error.outcome.processState, {
-      pid: 43210, exitCode: null, signalCode: null, killed: false, pidProbe: 'PRESENT'
+      pid: 43210, exitCode: null, signalCode: null, killed: false, pidProbe: 'PRESENT', lifecycleStatus: 'STILL_RUNNING'
     });
     return true;
   });
   assert.equal(probedPid, 43210);
+});
+
+test('bounded browser shutdown distinguishes an OS-gone child whose Node handle has not emitted exit', async () => {
+  const child = new EventEmitter();
+  child.pid = 43211;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.killed = false;
+  child.kill = () => false;
+  const outcome = await closeBrowserBounded({
+    closeGracefully: () => new Promise(() => {}),
+    killBrowserServer: () => new Promise(() => {}),
+    process: child,
+    probeProcess: pid => pid === 43211 ? 'NOT_FOUND' : 'PROBE_ERROR',
+    gracefulTimeoutMs: 2,
+    serverKillTimeoutMs: 2,
+    processExitTimeoutMs: 2
+  });
+  assert.equal(outcome.strategy, 'process-already-gone-not-reaped');
+  assert.equal(outcome.processExitConfirmed, false, 'lack of ChildProcess exit/close remains explicit');
+  assert.equal(outcome.processAbsenceConfirmed, true, 'OS PID absence is separate evidence that the process is gone');
+  assert.equal(outcome.processState.lifecycleStatus, 'ALREADY_GONE_NOT_REAPED');
+  assert.equal(outcome.processState.pidProbe, 'NOT_FOUND');
 });
 

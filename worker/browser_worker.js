@@ -14,9 +14,11 @@ import { redactSensitiveUrl } from '../core/investigators/url_redaction.js';
 import { classifyWorkerResultStatus } from '../core/investigators/worker_result_status.js';
 import { verifyChromiumSandbox } from './chromium_sandbox_verifier.js';
 import { appendBounded, isBoundedPng, serializeBoundedJson, MAX_RESULT_BYTES, MAX_TEXT_FIELD_CHARS } from './resource_limits.js';
-import { validateInteractiveAction, hasSensitiveText, isSafePointerTarget, isSafeTextTarget,
+import { validateInteractiveAction, hasSensitiveText, isSafeTextTarget,
   MAX_INTERACTIVE_ACTIONS, MAX_INTERACTIVE_POINTER_MOVES, MAX_INTERACTIVE_SCREENSHOTS, MAX_INTERACTIVE_VIEWPORT_FRAME_BYTES,
   INTERACTION_TIMEOUT_MS, MAX_SESSION_MS } from '../core/interactive_action.js';
+import { clickPointerInteractiveTarget, clickSelectedInteractiveTarget,
+  InteractiveActionPolicyError, pressFocusedInteractiveKey, typeFocusedInteractiveText } from '../core/interactive_browser_actions.js';
 
 // Parse command-line flags
 function parseArgs() {
@@ -788,11 +790,16 @@ async function runInteractiveSession(page, context, durationMs) {
     const pointerMove = action?.type === 'pointer_move';
     if (!validation.valid || (!pointerMove && count >= MAX_INTERACTIVE_ACTIONS) ||
         (pointerMove && pointerMoveCount >= MAX_INTERACTIVE_POINTER_MOVES) || (action?.type === 'screenshot' && screenshotCount >= MAX_INTERACTIVE_SCREENSHOTS) || Date.now() >= endsAt) {
-      process.stdout.write(`TL_RESPONSE:${JSON.stringify({ requestId, ok: false, error: 'Action rejected by session policy.' })}\n`); return;
+      const errorCode = !validation.valid ? 'INVALID_ACTION'
+        : (Date.now() >= endsAt ? 'SESSION_LIMIT_REACHED'
+          : (pointerMove && pointerMoveCount >= MAX_INTERACTIVE_POINTER_MOVES ? 'POINTER_LIMIT_REACHED'
+            : (action?.type === 'screenshot' && screenshotCount >= MAX_INTERACTIVE_SCREENSHOTS ? 'SCREENSHOT_LIMIT_REACHED' : 'ACTION_LIMIT_REACHED')));
+      process.stdout.write(`TL_RESPONSE:${JSON.stringify({ requestId, ok: false, errorCode, error: 'Action rejected by session policy.' })}\n`); return;
     }
     if (!pointerMove) emit('action_started', `Investigator requested ${action.type}.`);
     let response = { requestId, ok: true, action: action.type, url: redactSensitiveUrl(page.url()) };
     let pointerLinkClick = false;
+    let pageContextMayChange = false;
     try {
       const timeout = { timeout: INTERACTION_TIMEOUT_MS };
       if (action.type === 'navigate') await page.goto(action.url, { ...timeout, waitUntil: 'domcontentloaded' });
@@ -809,57 +816,26 @@ async function runInteractiveSession(page, context, durationMs) {
           await page.mouse.move(x, y);
           await page.mouse.wheel(0, (action.direction === 'up' ? -1 : 1) * action.pixels);
         } else {
-          const target = await page.evaluate(({ x, y }) => {
-            const hit = document.elementFromPoint(x, y);
-            const el = hit?.closest('a[href],button,[role="button"],input[type="search"],input[type="text"],textarea') || hit;
-            if (!el || !el.isConnected || !el.getClientRects().length) return null;
-            return { tagName: el.tagName, type: el.getAttribute('type') || '', name: el.getAttribute('name') || '',
-              id: el.id || '', autocomplete: el.getAttribute('autocomplete') || '', ariaLabel: el.getAttribute('aria-label') || '',
-              label: el.innerText || '', role: el.getAttribute('role') || '', withinForm: Boolean(el.closest('form')),
-              formMethod: el.closest('form')?.method || '',
-              disabled: Boolean(el.disabled), readOnly: Boolean(el.readOnly), download: el.hasAttribute('download'),
-              contentEditable: el.getAttribute('contenteditable') === 'true', href: el.href || '', target: el.getAttribute('target') || '' };
-          }, { x, y });
-          const safe = isSafePointerTarget(target);
-          if (!safe) throw new Error('The selected viewport target is not permitted.');
-          pointerLinkClick = target.tagName === 'A';
-          await page.mouse.click(x, y);
+          const clicked = await clickPointerInteractiveTarget(page, x, y);
+          response.targetKind = clicked.targetKind;
+          if (clicked.navigationChanged) response.navigationChanged = true;
+          pointerLinkClick = clicked.targetKind === 'link';
         }
       }
       else if (action.type === 'type_focused') {
-        const target = await page.evaluate(() => {
-          const el = document.activeElement;
-          if (!el || !el.isConnected || !el.getClientRects().length) return null;
-          return { tagName: el.tagName, type: el.getAttribute('type') || '', name: el.getAttribute('name') || '', id: el.id || '',
-            autocomplete: el.getAttribute('autocomplete') || '', ariaLabel: el.getAttribute('aria-label') || '',
-            withinForm: Boolean(el.closest('form')), formMethod: el.closest('form')?.method || '',
-            disabled: Boolean(el.disabled), readOnly: Boolean(el.readOnly) };
-        });
-        if (!isSafeTextTarget(target) || hasSensitiveText(action.text)) throw new Error('Text entry is not allowed for the focused field or content.');
-        await page.keyboard.press('Control+A');
-        await page.keyboard.type(action.text);
+        await typeFocusedInteractiveText(page, action.text);
         response.typed = true;
+        response.targetKind = 'text';
       }
       else if (action.type === 'key') {
-        const target = await page.evaluate(() => {
-          const el = document.activeElement;
-          if (!el || !el.isConnected || !el.getClientRects().length) return null;
-          return { tagName: el.tagName, type: el.getAttribute('type') || '', name: el.getAttribute('name') || '', id: el.id || '',
-            autocomplete: el.getAttribute('autocomplete') || '', ariaLabel: el.getAttribute('aria-label') || '',
-            withinForm: Boolean(el.closest('form')), formMethod: el.closest('form')?.method || '',
-            disabled: Boolean(el.disabled), readOnly: Boolean(el.readOnly) };
-        });
-        if (!isSafeTextTarget(target)) throw new Error('Keyboard input is not allowed for the focused field.');
-        await page.keyboard.press(action.key);
+        const result = await pressFocusedInteractiveKey(page, action.key);
+        response.targetKind = result.targetKind;
+        if (result.navigationChanged) response.navigationChanged = true;
+        pageContextMayChange = result.contextMayChange === true;
       }
       else if (action.type === 'click') {
-        const locator = page.locator(action.selector).first();
-        const safe = await locator.evaluate(el => el.isConnected && el.getClientRects().length > 0 && !el.closest('form') &&
-          !el.matches('a, input, select, textarea, [download], [contenteditable="true"]') &&
-          (el.tagName === 'BUTTON' ? (el.getAttribute('type') || 'submit') === 'button' : el.getAttribute('role') === 'button') &&
-          !/pay|payment|submit|download|permission|install|delete|remove|authorize|grant|login|log\s*in|sign\s*in|authenticate|verify|checkout|purchase|transfer|consent/i.test(`${el.innerText || ''} ${el.getAttribute('aria-label') || ''}`));
-        if (!safe) throw new Error('The selected element is not an allowed non-submitting control.');
-        await locator.click(timeout);
+        const clicked = await clickSelectedInteractiveTarget(page, action.selector, timeout);
+        response.targetKind = clicked.targetKind;
       } else if (action.type === 'type') {
         const locator = page.locator(action.selector).first();
         const target = await locator.evaluate(el => ({ visible: el.isConnected && el.getClientRects().length > 0,
@@ -880,14 +856,19 @@ async function runInteractiveSession(page, context, durationMs) {
       if (pointerMove) {
         if (pointerMoveCount % 20 === 0) emit('pointer_position_sampled', 'Coalesced pointer position updated.');
       } else {
-        const pageState = pointerLinkClick ? null : await page.evaluate(() => ({ titleLength: document.title.length,
+        const pageState = pointerLinkClick || pageContextMayChange ? null : await page.evaluate(() => ({ titleLength: document.title.length,
           visibleTextLength: document.body?.innerText?.length || 0, formCount: document.forms.length,
           inputTypes: [...document.querySelectorAll('input')].slice(0, 32).map(input => input.type || 'text') }));
         if (pageState) emit('dom_change', `Page state metadata: ${JSON.stringify(pageState).slice(0, 400)}.`);
         emit('action_completed', `Investigator ${action.type} action completed.`);
       }
     } catch (error) {
-      response = { requestId, ok: false, error: 'Action could not be completed under browser policy.' };
+      const errorCode = error instanceof InteractiveActionPolicyError ? error.code
+        : (error?.name === 'TimeoutError' ? 'ACTION_TIMEOUT' : 'BROWSER_ACTION_FAILED');
+      const safeError = errorCode === 'TARGET_UNAVAILABLE' ? 'The selected control is no longer available.'
+        : errorCode === 'TARGET_NOT_PERMITTED' || errorCode === 'KEY_NOT_PERMITTED' ? 'The selected control or key is not permitted.'
+          : errorCode === 'ACTION_TIMEOUT' ? 'The browser action timed out.' : 'The browser could not complete this action.';
+      response = { requestId, ok: false, errorCode, error: safeError };
       if (!pointerMove) emit('action_failed', `Investigator ${action.type} action failed.`);
     }
     if (response.ok) {

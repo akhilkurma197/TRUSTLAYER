@@ -16,7 +16,8 @@ function loadInteractiveUiContract() {
 
   const ids = ['ov-interactive-browser-card', 'interactive-status', 'interactive-status-detail', 'interactive-events',
     'interactive-viewport-status', 'interactive-viewport-shell', 'interactive-live-viewport', 'interactive-viewport-placeholder',
-    'interactive-viewport-input-status', 'interactive-screenshot-preview', 'interactive-navigate', 'interactive-click', 'interactive-type',
+    'interactive-viewport-input-status', 'interactive-screenshot-preview', 'interactive-back', 'interactive-forward', 'interactive-reload',
+    'interactive-navigate', 'interactive-click', 'interactive-type',
     'interactive-scroll', 'interactive-screenshot', 'interactive-cancel'];
   const elements = new Map(ids.map(id => [id, { id, style: {}, disabled: false, textContent: '', src: '', dataset: {}, removeAttribute() {} }]));
   elements.set('interactive-viewport-shell', null);

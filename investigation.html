@@ -656,10 +656,11 @@ html, body { height: 100%; overflow: hidden; background: var(--bg-deep); color: 
           <div id="interactive-viewport-input-status" role="status" aria-live="polite" style="font-size:10px;color:var(--text-muted);margin-top:5px;">Focus the viewport to use the mouse. Type into a focused search or standalone text field, then press Enter to send. Text stays local until Enter; do not enter secrets.</div>
           <div id="interactive-failure" role="status" style="color:#fbbf24;font-size:11px;margin-bottom:8px;"></div>
           <details style="margin-top:8px;"><summary style="cursor:pointer;color:var(--text-secondary);font-size:11px;">Button-based controls (fallback)</summary><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:6px;margin-top:8px;">
+            <button class="btn" id="interactive-back">Back</button><button class="btn" id="interactive-forward">Forward</button><button class="btn" id="interactive-reload">Reload</button>
             <input id="interactive-navigation-url" placeholder="https://destination (proxy validated)" aria-label="Navigation URL" maxlength="4096">
             <button class="btn" id="interactive-navigate">Navigate</button>
-            <input id="interactive-selector" placeholder="Visible button selector" aria-label="Visible button CSS selector" maxlength="160">
-            <button class="btn" id="interactive-click">Click permitted button</button>
+            <input id="interactive-selector" placeholder="Visible permitted control selector" aria-label="Visible control CSS selector" maxlength="160">
+            <button class="btn" id="interactive-click">Click permitted control</button>
             <input id="interactive-type-selector" placeholder="Standalone text field selector" aria-label="Text field CSS selector" maxlength="160">
             <input id="interactive-type-text" placeholder="Non-sensitive text only" aria-label="Non-sensitive text" maxlength="200">
             <button class="btn" id="interactive-type">Type bounded text</button>
@@ -1924,6 +1925,7 @@ let interactivePointerMoveTimer = null;
 let interactivePointerMoveInFlight = false;
 let interactiveViewportTextBuffer = '';
 let interactiveViewportDisconnected = false;
+let interactiveViewportTargetKind = 'unknown';
 
 function setViewportDisconnected(message) {
   const status = document.getElementById('interactive-viewport-status');
@@ -1957,7 +1959,7 @@ function scheduleInteractiveViewport(caseId, delay = 0) {
       image.src = nextUrl;
       image.style.display = 'block';
       interactiveViewportDisconnected = false;
-      for (const id of ['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel']) {
+      for (const id of ['interactive-back', 'interactive-forward', 'interactive-reload', 'interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel']) {
         document.getElementById(id).disabled = window.activeCase?.schema?.interactiveSession?.status !== 'RUNNING';
       }
       if (placeholder) placeholder.style.display = 'none';
@@ -1972,7 +1974,7 @@ function scheduleInteractiveViewport(caseId, delay = 0) {
       const current = window.activeCase;
       if (current?.schema?.interactiveSession?.status === 'RUNNING') {
         if (interactiveViewportDisconnected) {
-          for (const id of ['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel']) document.getElementById(id).disabled = true;
+          for (const id of ['interactive-back', 'interactive-forward', 'interactive-reload', 'interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel']) document.getElementById(id).disabled = true;
         }
         if (interactiveViewportCaseId !== current.id) interactiveViewportCaseId = current.id;
         scheduleInteractiveViewport(current.id, interactiveViewportDisconnected ? 2000 : 500);
@@ -1989,6 +1991,7 @@ function stopInteractiveViewport(message = 'Viewport stopped.') {
   interactiveViewportCaseId = null;
   interactiveViewportDisconnected = false;
   interactiveViewportTextBuffer = '';
+  interactiveViewportTargetKind = 'unknown';
   if (interactiveViewportObjectUrl) URL.revokeObjectURL(interactiveViewportObjectUrl);
   interactiveViewportObjectUrl = null;
   const image = document.getElementById('interactive-live-viewport');
@@ -2090,6 +2093,12 @@ function bindInteractiveViewport() {
   }, { passive: false });
   shell.addEventListener('keydown', event => {
     const textStatus = document.getElementById('interactive-viewport-input-status');
+    const keyboardControlKinds = ['checkbox', 'radio', 'select', 'button', 'tab', 'disclosure'];
+    if (event.key === ' ' && !interactiveViewportTextBuffer && keyboardControlKinds.includes(interactiveViewportTargetKind)) {
+      event.preventDefault();
+      void submitInteractiveAction({ type: 'key', key: 'Space' }, { refreshCase: false });
+      return;
+    }
     if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
       if (interactiveViewportTextBuffer.length < 200) interactiveViewportTextBuffer += event.key;
       if (textStatus) textStatus.textContent = `Text buffered locally (${interactiveViewportTextBuffer.length}/200); press Enter to send to the focused isolated page. Nothing has been sent yet.`;
@@ -2107,7 +2116,7 @@ function bindInteractiveViewport() {
       const text = interactiveViewportTextBuffer;
       interactiveViewportTextBuffer = '';
       if (!text) {
-        if (textStatus) textStatus.textContent = 'No text was buffered; nothing was sent to the isolated page.';
+        void submitInteractiveAction({ type: 'key', key: 'Enter' }, { refreshCase: false });
         return;
       }
       if (isSensitiveViewportText(text)) {
@@ -2121,8 +2130,13 @@ function bindInteractiveViewport() {
       if (textStatus) textStatus.textContent = 'Sending bounded input to the focused isolated page.';
       return;
     }
-    if (['Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
+    const navigationKeys = ['Tab', 'Escape', 'Backspace', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'];
+    if (navigationKeys.includes(event.key)) {
       event.preventDefault();
+      if (interactiveViewportTextBuffer) {
+        interactiveViewportTextBuffer = '';
+        if (textStatus) textStatus.textContent = 'Unsent text cleared before changing focus; press Enter first to send it.';
+      }
       void submitInteractiveAction({ type: 'key', key: event.key }, { refreshCase: false });
     }
   });
@@ -2155,11 +2169,11 @@ function renderInteractivePanel(schema) {
                   : `Interactive session ${status.toLowerCase()}; controls are disabled. Create a new interactive case to start another session.`)
           : `Interactive session status: ${status}. Controls remain disabled until the worker is confirmed ready.`));
   }
-  for (const id of ['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel']) document.getElementById(id).disabled = !running;
+  for (const id of ['interactive-back', 'interactive-forward', 'interactive-reload', 'interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel']) document.getElementById(id).disabled = !running;
   if (running) {
     if (interactiveViewportCaseId !== schema.id) stopInteractiveViewport('Connecting to the isolated browser…');
     interactiveViewportCaseId = schema.id;
-    for (const id of ['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel']) {
+    for (const id of ['interactive-back', 'interactive-forward', 'interactive-reload', 'interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel']) {
       document.getElementById(id).disabled = interactiveViewportDisconnected;
     }
     bindInteractiveViewport();
@@ -2186,8 +2200,13 @@ async function submitInteractiveAction(action, { refreshCase = true, quiet = fal
     const result = await response.json();
     if (!response.ok) {
       const detail = Array.isArray(result.details) ? ` ${result.details.join(' ')}` : '';
-      throw new Error(`${result.error || `Action failed (HTTP ${response.status}).`}${detail}`);
+      const category = typeof result.errorCode === 'string' ? `${result.errorCode}: ` : '';
+      throw new Error(`${category}${result.error || `Action failed (HTTP ${response.status}).`}${detail}`);
     }
+    if (result.navigationChanged || action.type === 'navigate' || action.type === 'back' || action.type === 'forward' || action.type === 'reload') {
+      interactiveViewportTargetKind = 'unknown';
+      interactiveViewportTextBuffer = '';
+    } else if (typeof result.targetKind === 'string') interactiveViewportTargetKind = result.targetKind;
     if (!quiet) failure.textContent = `${result.action} completed.`;
     if (result.artifactId) {
       const image = document.getElementById('interactive-screenshot-preview');
@@ -2203,6 +2222,9 @@ async function submitInteractiveAction(action, { refreshCase = true, quiet = fal
 }
 
 document.getElementById('interactive-navigate')?.addEventListener('click', () => submitInteractiveAction({ type: 'navigate', url: document.getElementById('interactive-navigation-url').value }));
+document.getElementById('interactive-back')?.addEventListener('click', () => submitInteractiveAction({ type: 'back' }));
+document.getElementById('interactive-forward')?.addEventListener('click', () => submitInteractiveAction({ type: 'forward' }));
+document.getElementById('interactive-reload')?.addEventListener('click', () => submitInteractiveAction({ type: 'reload' }));
 document.getElementById('interactive-click')?.addEventListener('click', () => submitInteractiveAction({ type: 'click', selector: document.getElementById('interactive-selector').value }));
 document.getElementById('interactive-type')?.addEventListener('click', () => submitInteractiveAction({ type: 'type', selector: document.getElementById('interactive-type-selector').value, text: document.getElementById('interactive-type-text').value }));
 document.getElementById('interactive-scroll')?.addEventListener('click', () => {

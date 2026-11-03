@@ -390,7 +390,7 @@ app.post('/api/cases/:id/interactions', async (req, res) => {
   const validation = validateInteractiveAction(req.body?.action);
   if (!validation.valid) {
     icase._publishInteractiveObservation?.({ type: 'action_rejected', observation: 'Investigator action rejected by the interaction schema.' });
-    return res.status(400).json({ error: 'Invalid interaction action.', details: validation.errors });
+    return res.status(400).json({ error: 'Invalid interaction action.', errorCode: 'INVALID_ACTION', details: validation.errors });
   }
   const action = req.body.action;
   const actionId = req.body.actionId;
@@ -421,13 +421,13 @@ app.post('/api/cases/:id/interactions', async (req, res) => {
     const refillPerMinute = pointerMove ? INTERACTION_POINTER_PER_MINUTE : INTERACTION_DISCRETE_PER_MINUTE;
     if (!consumeTokenBucket(interactionBuckets, `interact:${category}:${req.socket.remoteAddress || 'unknown'}:${icase.id}`,
       { capacity, refillPerMinute })) {
-      return { status: 429, body: { error: 'Interaction request rate limit reached.' } };
+      return { status: 429, body: { error: 'Interaction request rate limit reached.', errorCode: 'RATE_LIMITED' } };
     }
     if (!pointerMove) icase._publishInteractiveObservation?.({ type: 'action_accepted', observation: `Investigator ${action.type} action accepted for worker validation.` });
     const result = await globalJobController.interact(icase.id, action);
     if (!result.ok) {
       if (!pointerMove) icase._publishInteractiveObservation?.({ type: 'action_rejected', observation: 'Investigator action was rejected by the worker session or destination policy.' });
-      return { status: 409, body: { error: result.error } };
+      return { status: 409, body: { error: result.error, ...(result.errorCode ? { errorCode: result.errorCode } : {}) } };
     }
     if (!pointerMove) icase.schema.interactiveSession.actionCount++;
     icase.schema.interactiveSession.currentUrl = result.url || icase.schema.interactiveSession.currentUrl;
@@ -451,7 +451,9 @@ app.post('/api/cases/:id/interactions', async (req, res) => {
       } catch { return { status: 502, body: { error: 'Screenshot artifact was rejected.' } }; }
     }
     icase._publishInteractiveObservation?.({ type: `action_${result.action}`, observation: `Investigator ${result.action} action completed.`, url: result.url });
-    return { status: 200, body: { ok: true, action: result.action, url: result.url, ...(result.typed ? { typed: true } : {}) } };
+    return { status: 200, body: { ok: true, action: result.action, url: result.url,
+      ...(result.typed ? { typed: true } : {}), ...(result.targetKind ? { targetKind: result.targetKind } : {}),
+      ...(result.navigationChanged ? { navigationChanged: true } : {}) } };
   };
 
   let execution;

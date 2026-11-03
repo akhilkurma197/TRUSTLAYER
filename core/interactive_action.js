@@ -74,6 +74,7 @@ export function hasSensitiveText(value) {
 
 const SENSITIVE_FIELD = /(password|passwd|user|email|account|login|auth|otp|one.?time|code|card|cc-(?:number|name|exp|csc|type)|cvv|security|phone|mobile|bank|iban|routing|secret|token)/i;
 const DANGEROUS_CONTROL = /(pay|payment|submit|download|permission|install|delete|remove|authorize|grant|verify|checkout|purchase|transfer|consent|login|sign.?in|authenticate)/i;
+const KEYBOARD_KEYS = new Set(['Enter', 'Tab', 'Escape', 'Backspace', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']);
 
 export function isSafeTextTarget(target) {
   if (!target || target.disabled || target.readOnly || SENSITIVE_FIELD.test(`${target.name || ''} ${target.id || ''} ${target.autocomplete || ''} ${target.ariaLabel || ''}`)) return false;
@@ -86,9 +87,12 @@ export function isSafeTextTarget(target) {
 }
 
 export function isSafePointerTarget(target) {
-  if (!target || DANGEROUS_CONTROL.test(`${target.label || ''} ${target.ariaLabel || ''} ${target.name || ''} ${target.id || ''}`)) return false;
+  const descriptor = `${target?.label || ''} ${target?.ariaLabel || ''} ${target?.name || ''} ${target?.id || ''} ${target?.autocomplete || ''}`;
+  if (!target || target.disabled || target.ariaDisabled || DANGEROUS_CONTROL.test(descriptor)) return false;
   const tag = String(target.tagName || '').toLowerCase();
   const type = String(target.type || '').toLowerCase();
+  if (SENSITIVE_FIELD.test(descriptor) && ((tag === 'input' && ['checkbox', 'radio'].includes(type)) || tag === 'select' ||
+      ['checkbox', 'radio', 'switch', 'combobox'].includes(target.role))) return false;
   if ((tag === 'input' && ['search', 'text'].includes(type)) || tag === 'textarea') return isSafeTextTarget(target);
   if (tag === 'a') {
     if (target.withinForm || target.download || target.contentEditable ||
@@ -98,9 +102,36 @@ export function isSafePointerTarget(target) {
       return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password;
     } catch { return false; }
   }
+  const safeForm = !target.withinForm || String(target.formMethod || 'get').toLowerCase() === 'get';
+  if (tag === 'input' && ['checkbox', 'radio'].includes(type)) return safeForm && !target.contentEditable;
+  if (tag === 'select') return safeForm && !target.contentEditable;
+  if (['checkbox', 'radio', 'switch', 'combobox'].includes(target.role)) return safeForm && !target.contentEditable;
+  if (tag === 'summary') return !target.withinForm && !target.contentEditable;
+  if (target.role === 'tab') return !target.withinForm && !target.contentEditable;
   if (target.withinForm || target.download || target.contentEditable) return false;
   if (tag === 'button') return (type || 'submit') === 'button';
   return target.role === 'button';
+}
+
+export function isSafeKeyboardTarget(target, key) {
+  if (!target || !KEYBOARD_KEYS.has(key) || target.disabled || target.ariaDisabled ||
+      DANGEROUS_CONTROL.test(`${target.label || ''} ${target.ariaLabel || ''} ${target.name || ''} ${target.id || ''}`)) return false;
+  const tag = String(target.tagName || '').toLowerCase();
+  if (['body', 'html'].includes(tag)) return ['Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Space'].includes(key);
+  if (key === 'Tab' || key === 'Escape') return !SENSITIVE_FIELD.test(`${target.name || ''} ${target.id || ''} ${target.autocomplete || ''} ${target.ariaLabel || ''}`);
+  if (isSafeTextTarget(target)) return true;
+  if (!isSafePointerTarget(target)) return false;
+  if (tag === 'a') return key === 'Enter';
+  if (tag === 'select' || target.role === 'combobox') return ['Enter', 'Space', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(key);
+  if (['checkbox', 'switch'].includes(target.role)) return ['Enter', 'Space'].includes(key);
+  if (target.role === 'radio' || (tag === 'input' && String(target.type || '').toLowerCase() === 'radio')) {
+    return ['Enter', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(key);
+  }
+  if ((tag === 'input' && ['checkbox', 'radio'].includes(String(target.type || '').toLowerCase())) ||
+      tag === 'summary' || tag === 'button' || ['button', 'tab'].includes(target.role)) {
+    return ['Enter', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key);
+  }
+  return false;
 }
 
 export function validateInteractiveAction(action) {
@@ -132,7 +163,7 @@ export function validateInteractiveAction(action) {
   if (action.type === 'type_focused' && (typeof action.text !== 'string' || action.text.length < 1 || action.text.length > MAX_INTERACTION_TEXT || /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(action.text) || hasSensitiveText(action.text))) {
     errors.push('Text is empty, too long, contains control characters, or matches a sensitive-input pattern.');
   }
-  if (action.type === 'key' && !['Enter', 'Tab', 'Escape', 'Backspace', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(action.key)) {
+  if (action.type === 'key' && !KEYBOARD_KEYS.has(action.key)) {
     errors.push('Keyboard key is not allowed.');
   }
   if (['click', 'type'].includes(action.type) && (typeof action.selector !== 'string' || action.selector.length > 128 || !SELECTOR.test(action.selector))) {

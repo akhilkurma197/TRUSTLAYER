@@ -9,6 +9,7 @@ const fixtureTest = fs.readFileSync(new URL('./docker_interactive_fixture.test.j
 const typingDiagnosticHelper = fs.readFileSync(new URL('./helpers/typing_control_failure_diagnostic.js', import.meta.url), 'utf8');
 const cardObserverHelper = fs.readFileSync(new URL('./helpers/interactive_card_observer.js', import.meta.url), 'utf8');
 const browserWorker = fs.readFileSync(new URL('../worker/browser_worker.js', import.meta.url), 'utf8');
+const browserActions = fs.readFileSync(new URL('../core/interactive_browser_actions.js', import.meta.url), 'utf8');
 const investigationEngine = fs.readFileSync(new URL('../core/investigation_engine.js', import.meta.url), 'utf8');
 const backendServer = fs.readFileSync(new URL('../backend/server.js', import.meta.url), 'utf8');
 
@@ -63,7 +64,7 @@ test('interactive type control exists uniquely and follows session readiness sta
   assert.equal((consoleHtml.match(/id="interactive-type"/g) || []).length, 1,
     'the Playwright action selector must identify one real control');
   assert.match(consoleHtml, /<button[^>]*id="interactive-type"[^>]*>Type bounded text<\/button>/);
-  assert.match(consoleHtml, /for \(const id of \['interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel'\]\) document\.getElementById\(id\)\.disabled = !running/);
+  assert.match(consoleHtml, /for \(const id of \['interactive-back', 'interactive-forward', 'interactive-reload', 'interactive-navigate', 'interactive-click', 'interactive-type', 'interactive-scroll', 'interactive-screenshot', 'interactive-cancel'\]\) document\.getElementById\(id\)\.disabled = !running/);
   assert.match(consoleHtml, /const running = status === 'RUNNING'/);
   assert.match(consoleHtml, /document\.getElementById\('interactive-type'\)\?\.addEventListener\('click'/);
   assert.match(consoleHtml, /card\.style\.display = session\?\.enabled \? 'block' : 'none'/);
@@ -72,6 +73,10 @@ test('interactive type control exists uniquely and follows session readiness sta
   assert.match(consoleHtml, /id="interactive-status-detail"[\s\S]*?Controls unlock only after sandbox verification and the worker start handshake/,
     'the visible card must explain the pending readiness gate');
   assert.match(consoleHtml, /id="interactive-scroll"/);
+  for (const [id, type] of [['interactive-back', 'back'], ['interactive-forward', 'forward'], ['interactive-reload', 'reload']]) {
+    assert.match(consoleHtml, new RegExp(`id="${id}"`));
+    assert.match(consoleHtml, new RegExp(`submitInteractiveAction\\(\\{ type: '${type}' \\}\\)`));
+  }
   assert.match(consoleHtml, /submitInteractiveAction\(\{ type: 'scroll', direction, pixels \}\)/,
     'the UI must expose only the worker-supported bounded scroll action');
   assert.match(consoleHtml, /pixels < 1 \|\| pixels > 800/,
@@ -83,6 +88,8 @@ test('interactive type control exists uniquely and follows session readiness sta
     'keyboard text is buffered locally until explicit Enter submission');
   assert.match(consoleHtml, /pointer_click/);
   assert.match(consoleHtml, /pointer_scroll/);
+  assert.match(consoleHtml, /const keyboardControlKinds = \['checkbox', 'radio', 'select', 'button', 'tab', 'disclosure'\]/,
+    'Space key routing must distinguish focused controls from buffered text');
   assert.match(consoleHtml, /interactiveViewportDisconnected[\s\S]*?document\.getElementById\(id\)\.disabled = true/,
     'worker disconnect disables all browser inputs');
   assert.match(consoleHtml, /Array\.isArray\(result\.details\)[\s\S]*?result\.details\.join\(' '\)/,
@@ -93,10 +100,15 @@ test('interactive type control exists uniquely and follows session readiness sta
     'viewport responses require the live case session to remain active');
   assert.match(browserWorker, /CAPTURE_VIEWPORT/);
   assert.match(browserWorker, /type: 'jpeg', quality: 45/);
-  assert.match(browserWorker, /isSafeTextTarget\(target\) \|\| hasSensitiveText\(action\.text\)/,
+  assert.match(browserActions, /!isSafeTextTarget\(target\) \|\| hasSensitiveText\(text\)/,
     'the worker independently verifies focus and text before keyboard entry');
-  assert.match(browserWorker, /page\.keyboard\.press\('Control\+A'\)/,
+  assert.match(browserWorker, /typeFocusedInteractiveText\(page, action\.text\)/);
+  assert.match(browserActions, /page\.keyboard\.press\('Control\+A'\)/,
     'viewport text replaces rather than submits an existing page-field value');
+  assert.match(consoleHtml, /event\.key === ' ' && !interactiveViewportTextBuffer/,
+    'Space activates focused native controls while buffered text remains local');
+  assert.match(consoleHtml, /submitInteractiveAction\(\{ type: 'key', key: 'Enter' \}/,
+    'Enter activates a focused control when there is no buffered text');
   assert.match(backendServer, /MAX_INTERACTIVE_VIEWPORT_FRAME_BYTES/);
 });
 

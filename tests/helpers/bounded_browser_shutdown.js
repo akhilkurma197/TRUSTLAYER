@@ -43,12 +43,18 @@ function processSnapshot(child, probeProcess) {
   if (pid !== null) {
     try { pidProbe = probeProcess(pid); } catch { pidProbe = 'PROBE_ERROR'; }
   }
+  const exited = processExited(child);
+  const lifecycleStatus = exited ? 'EXITED'
+    : pidProbe === 'NOT_FOUND' ? 'ALREADY_GONE_NOT_REAPED'
+      : pidProbe === 'PRESENT' ? 'STILL_RUNNING'
+        : 'STILL_RUNNING_OR_UNCONFIRMED';
   return {
     pid,
     exitCode: Number.isInteger(child?.exitCode) ? child.exitCode : null,
     signalCode: typeof child?.signalCode === 'string' ? child.signalCode : null,
     killed: typeof child?.killed === 'boolean' ? child.killed : null,
-    pidProbe
+    pidProbe,
+    lifecycleStatus
   };
 }
 
@@ -99,7 +105,7 @@ export async function closeBrowserBounded({
       directProcessTerminationAttempted: false, directProcessTerminationSent: false,
       directProcessTerminationStatus: 'NOT_NEEDED_GRACEFUL_EXIT_CONFIRMED', gracefulDurationMs,
       serverKillDurationMs: null, serverKillExitWaitMs: null, fallbackExitWaitMs: null,
-      processExitConfirmed: true };
+      processExitConfirmed: true, processState: processSnapshot(process, probeProcess) };
   }
 
   const serverKillInvoked = true;
@@ -118,7 +124,8 @@ export async function closeBrowserBounded({
         serverKillInvoked, serverKillStatus: serverKill.status,
         directProcessTerminationAttempted: false, directProcessTerminationSent: false,
         directProcessTerminationStatus: 'NOT_NEEDED_SERVER_KILL_EXIT_CONFIRMED', gracefulDurationMs,
-        serverKillDurationMs, serverKillExitWaitMs, fallbackExitWaitMs, processExitConfirmed: true };
+        serverKillDurationMs, serverKillExitWaitMs, fallbackExitWaitMs, processExitConfirmed: true,
+        processState: processSnapshot(process, probeProcess) };
     }
   }
 
@@ -156,6 +163,19 @@ export async function closeBrowserBounded({
   const processExitConfirmed = await exitPromise;
   fallbackExitWaitMs = elapsedMs(fallbackExitWaitStartedAt);
   if (!processExitConfirmed) {
+    const processState = processSnapshot(process, probeProcess);
+    if (processState.lifecycleStatus === 'ALREADY_GONE_NOT_REAPED') {
+      return { strategy: 'process-already-gone-not-reaped', gracefulStatus: graceful.status,
+        serverKillInvoked, serverKillStatus: serverKill.status,
+        gracefulDurationMs, serverKillDurationMs, serverKillExitWaitMs, fallbackExitWaitMs,
+        ...(graceful.errorName ? { gracefulErrorName: graceful.errorName } : {}),
+        ...(serverKill.errorName ? { serverKillErrorName: serverKill.errorName } : {}),
+        directProcessTerminationAttempted, directProcessTerminationSent, directProcessTerminationStatus,
+        alreadyExitedBeforeDirectTermination, processExitConfirmed: false,
+        processAbsenceConfirmed: true, processState };
+    }
+  }
+  if (!processExitConfirmed) {
     const error = new Error('Browser shutdown failed; process exit was not confirmed within the deadline.');
     error.code = 'BROWSER_SHUTDOWN_FAILED';
     error.outcome = { strategy: 'failed', gracefulStatus: graceful.status, serverKillInvoked,
@@ -179,5 +199,6 @@ export async function closeBrowserBounded({
     ...(serverKill.errorName ? { serverKillErrorName: serverKill.errorName } : {}),
     directProcessTerminationAttempted, directProcessTerminationSent, directProcessTerminationStatus,
     alreadyExitedBeforeDirectTermination,
-    ...(terminationErrorName ? { terminationErrorName } : {}), processExitConfirmed: true };
+    ...(terminationErrorName ? { terminationErrorName } : {}), processExitConfirmed: true,
+    processState: processSnapshot(process, probeProcess) };
 }

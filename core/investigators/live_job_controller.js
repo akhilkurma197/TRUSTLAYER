@@ -992,14 +992,15 @@ export class LiveJobController {
 
   async interact(caseId, action) {
     const validation = validateInteractiveAction(action);
-    if (!validation.valid) return { ok: false, error: 'Invalid interaction action.' };
+    if (!validation.valid) return { ok: false, error: 'Invalid interaction action.', errorCode: 'INVALID_ACTION' };
     const handle = [...this.activeJobs.values()].find(item => item.job?.caseId === caseId && item.interactive);
     if (!handle || !handle.interactiveReady || !handle.interactiveStarted || !handle.child?.stdin || handle.child.exitCode !== null ||
         !Number.isFinite(handle.sessionDeadline) || Date.now() >= handle.sessionDeadline) {
-      return { ok: false, error: 'Interactive browser session is unavailable.' };
+      return { ok: false, error: 'Interactive browser session is unavailable.', errorCode: 'SESSION_UNAVAILABLE' };
     }
     handle.pendingActionSlots = Number.isSafeInteger(handle.pendingActionSlots) ? handle.pendingActionSlots : 0;
-    if (handle.pendingActionSlots >= MAX_PENDING_INTERACTIVE_ACTIONS) return { ok: false, error: 'Interactive action queue is full; wait for an action to complete.' };
+    if (handle.pendingActionSlots >= MAX_PENDING_INTERACTIVE_ACTIONS) return { ok: false,
+      error: 'Interactive action queue is full; wait for an action to complete.', errorCode: 'ACTION_QUEUE_FULL' };
     handle.pendingActionSlots++;
     const pointerMove = action.type === 'pointer_move';
     const budgetCount = pointerMove ? 'pointerMoveCount' : 'interactionCount';
@@ -1009,7 +1010,7 @@ export class LiveJobController {
     const budgetLimit = pointerMove ? MAX_INTERACTIVE_POINTER_MOVES : MAX_INTERACTIVE_ACTIONS;
     if (handle[budgetCount] + handle[budgetPending] >= budgetLimit) {
       handle.pendingActionSlots--;
-      return { ok: false, error: pointerMove ? 'Pointer movement limit reached.' : 'Interaction limit reached.' };
+      return { ok: false, error: pointerMove ? 'Pointer movement limit reached.' : 'Interaction limit reached.', errorCode: 'ACTION_LIMIT_REACHED' };
     }
     handle[budgetPending]++;
     let slotReleased = false;
@@ -1023,8 +1024,8 @@ export class LiveJobController {
     if (action.type === 'navigate') {
       let checked;
       try { checked = await this.validateDestination(action.url); }
-      catch { releaseSlot(); return { ok: false, error: 'Navigation destination could not be validated.' }; }
-      if (!checked.allowed) { releaseSlot(); return { ok: false, error: 'Navigation was blocked by destination policy.' }; }
+      catch { releaseSlot(); return { ok: false, error: 'Navigation destination could not be validated.', errorCode: 'DESTINATION_VALIDATION_FAILED' }; }
+      if (!checked.allowed) { releaseSlot(); return { ok: false, error: 'Navigation was blocked by destination policy.', errorCode: 'NAVIGATION_BLOCKED' }; }
       action = { type: 'navigate', url: checked.canonicalUrl };
     }
     const requestId = randomUUID();
@@ -1032,12 +1033,13 @@ export class LiveJobController {
       const finish = result => { releaseSlot(result); resolve(result); };
       const timer = setTimeout(() => {
         handle.pendingInteractions.delete(requestId);
-        finish({ ok: false, error: 'Interaction timed out; the isolated session was stopped.' });
+        finish({ ok: false, error: 'Interaction timed out; the isolated session was stopped.', errorCode: 'ACTION_TIMEOUT' });
         handle.cancel?.();
       }, INTERACTION_TIMEOUT_MS);
       handle.pendingInteractions.set(requestId, { kind: 'action', resolve: finish, timer });
       try { handle.child.stdin.write(`${JSON.stringify({ requestId, action })}\n`); }
-      catch { clearTimeout(timer); handle.pendingInteractions.delete(requestId); finish({ ok: false, error: 'Interactive browser session is unavailable.' }); }
+      catch { clearTimeout(timer); handle.pendingInteractions.delete(requestId); finish({ ok: false,
+        error: 'Interactive browser session is unavailable.', errorCode: 'SESSION_UNAVAILABLE' }); }
     });
   }
 
